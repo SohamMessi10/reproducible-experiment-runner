@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Runs and generated demo data (made by `exprun run` and `exprun demo`)
+runs/
+out/
+
+# Secrets and local config
+.env
+
+# macOS
+.DS_Store

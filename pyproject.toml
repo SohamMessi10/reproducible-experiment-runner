@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reproducible-experiment-runner"
+version = "0.1.0"
+description = "Run experiments from a config file and record what is needed to reproduce and compare them: config and data hashes, seed, code version, environment, status and metrics."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []   # the runner itself uses the standard library only
+
+[project.optional-dependencies]
+# Lower bounds are releases at least two weeks old when they were chosen (2026-11-11).
+demo = [
+    "numpy>=2.5.4,<3",
+    "scikit-learn>=1.9.1,<2",
+]
+dev = [
+    "pytest>=9.2,<10",
+    "hypothesis>=6.170.12,<7",
+    "ruff>=0.17.3,<0.18",
+]
+
+[project.scripts]
+exprun = "exprun.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# pyflakes, syntax errors, bugbear, pyupgrade, simplify, import order
+select = ["F", "E9", "B", "UP", "SIM", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
