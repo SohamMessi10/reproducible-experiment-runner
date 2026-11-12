@@ -48,6 +48,17 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
     show.add_argument("--json", action="store_true", help="print the manifest")
 
+    rerun = commands.add_parser("rerun", help="run a past run again from its manifest and check it reproduces")
+    rerun.add_argument("run", help="a run id, a unique start of one, or 'latest'")
+    rerun.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    rerun.add_argument("--tolerance", type=float, default=0.0, metavar="REL",
+                       help="accept numeric metrics within this relative difference, such as 1e-9 (judges metrics "
+                            "only); default: exact")
+    rerun.add_argument("--allow-code-change", action="store_true",
+                       help="run even if the task's code changed, to test whether the current code reproduces it")
+    rerun.add_argument("--timeout", type=float, metavar="SECONDS", help="stop the task after this long")
+    rerun.add_argument("--quiet", action="store_true", help="don't echo the task's output (it is still logged)")
+
     compare = commands.add_parser("compare", help="show what differs between runs")
     compare.add_argument("runs_to_compare", nargs="+", metavar="RUN", help="two or more runs (ids, unique starts, 'latest')")
     compare.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
@@ -107,6 +118,10 @@ def check_command(args) -> int:
         print(f"config hash: {_short(identity.config_hash)}")
         print(f"fingerprint: {_short(identity.fingerprint)}")
     return EXIT_OK
+
+
+def _count(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
 
 
 def _metric(value) -> str:
@@ -271,8 +286,77 @@ def compare_command(args) -> int:
     return EXIT_OK
 
 
+def rerun_command(args) -> int:
+    from exprun.report import compare, section_lines, show_metric
+    from exprun.reproduce import CannotRerun, judge, prepare
+    from exprun.runner import execute
+    from exprun.store import RunStore
+
+    if not (args.tolerance >= 0 and args.tolerance < 1):
+        print("exprun: --tolerance must be a relative difference from 0 up to (not including) 1", file=sys.stderr)
+        return EXIT_USAGE
+    if args.timeout is not None and not args.timeout > 0:
+        print("exprun: --timeout must be a positive number of seconds", file=sys.stderr)
+        return EXIT_USAGE
+    store = RunStore(args.runs)
+    found, error = _load_runs(store, [args.run])
+    if error:
+        print(f"exprun: {error[0]}", file=sys.stderr)
+        return error[1]
+    original_folder, original, _ = found[0]
+    try:
+        config, changes = prepare(original, original_folder.path, args.allow_code_change)
+    except CannotRerun as exc:
+        print(f"exprun: can't rerun {original['id']}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    for change in changes:
+        print(f"note: {change} (allowed by --allow-code-change)", file=sys.stderr)
+
+    def started(folder, manifest) -> None:
+        print(f"rerun of {original['id']} (seed {manifest['spec']['seed']}) as run {folder.id}", file=sys.stderr,
+              flush=True)
+
+    try:
+        folder, manifest = execute(config, store, overrides=original["config"].get("overrides") or [],
+                                   timeout=args.timeout, quiet=args.quiet, on_start=started, rerun_of=original)
+    except OSError as exc:
+        print(f"exprun: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    result = judge(original, manifest, args.tolerance)
+    result["of"] = original["id"]
+    result["code_changes"] = changes
+    manifest["reproduction"] = result
+    folder.write(manifest)
+    print(f"{manifest['status']} in {manifest['duration_s']:.2f} s", file=sys.stderr)
+    outcome = result["outcome"]
+    if result["reproduced"]:
+        metrics, outputs = len(original.get("metrics") or {}), len(original.get("outputs") or {})
+        detail = (f"{_count(metrics, 'metric')} equal, {_count(outputs, 'output file')} byte-identical"
+                  if outcome == "identical" else
+                  f"largest relative difference {result['max_relative_difference']:.3g} <= {args.tolerance:g}")
+        print(f"reproduced: {outcome} ({detail})")
+        return EXIT_OK
+    print(f"NOT reproduced: {outcome}")
+    if manifest["error"]:
+        print(f"  the rerun failed: {manifest['error']['type']}: {manifest['error']['message']}")
+    for entry in result["metric_differences"]:
+        extra = f"  (relative difference {entry['relative_difference']:.3g})" if "relative_difference" in entry else ""
+        print(f"  {entry['metric']}: {show_metric(entry['original'])} -> {show_metric(entry['rerun'])}{extra}")
+    for path in result["output_differences"]:
+        print(f"  output {path} differs")
+    differences = section_lines(compare([original, manifest]), ["original", "rerun"])
+    if differences:
+        print("what else differs:")
+        for line in differences[1:]:
+            print("  " + line if line else "")
+    else:
+        print("config, data, code and environment are the same as recorded: the task itself isn't deterministic "
+              "(an unseeded random source, the clock, thread scheduling ...)")
+    return EXIT_NOT_REPRODUCED
+
+
 COMMANDS = {"check": check_command, "run": run_command, "list": list_command, "show": show_command,
-            "compare": compare_command}
+            "compare": compare_command, "rerun": rerun_command}
 
 
 def run(argv: list[str] | None = None) -> int:
