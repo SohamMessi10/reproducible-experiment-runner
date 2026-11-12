@@ -59,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     rerun.add_argument("--timeout", type=float, metavar="SECONDS", help="stop the task after this long")
     rerun.add_argument("--quiet", action="store_true", help="don't echo the task's output (it is still logged)")
 
+    demo = commands.add_parser("demo", help="write a ready-to-run demo (handwritten digits, scikit-learn)")
+    demo.add_argument("folder", type=Path, help="where to write it (created if needed; nothing is overwritten)")
+
     compare = commands.add_parser("compare", help="show what differs between runs")
     compare.add_argument("runs_to_compare", nargs="+", metavar="RUN", help="two or more runs (ids, unique starts, 'latest')")
     compare.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
@@ -355,8 +358,29 @@ def rerun_command(args) -> int:
     return EXIT_NOT_REPRODUCED
 
 
+def demo_command(args) -> int:
+    from exprun.demo import export
+
+    try:
+        written = export(args.folder)
+    except ModuleNotFoundError as exc:
+        print(f"exprun: the demo needs scikit-learn and NumPy ({exc.name} is missing): "
+              'pip install "reproducible-experiment-runner[demo]"', file=sys.stderr)
+        return EXIT_USAGE
+    except FileExistsError as exc:
+        print(f"exprun: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except OSError as exc:
+        print(f"exprun: can't write the demo ({exc})", file=sys.stderr)
+        return EXIT_FAILED
+    for path in written:
+        print(f"wrote {path}")
+    print(f"next: exprun run {args.folder / 'logistic.toml'}")
+    return EXIT_OK
+
+
 COMMANDS = {"check": check_command, "run": run_command, "list": list_command, "show": show_command,
-            "compare": compare_command, "rerun": rerun_command}
+            "compare": compare_command, "rerun": rerun_command, "demo": demo_command}
 
 
 def run(argv: list[str] | None = None) -> int:

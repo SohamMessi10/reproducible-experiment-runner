@@ -405,3 +405,11 @@ def test_a_rerun_that_fails_is_not_reproduced(project, capsys):
     assert main(["rerun", original, *runs_args(project), "--quiet", "--allow-code-change"]) == 3
     out = capsys.readouterr().out
     assert out.startswith("NOT reproduced: failed\n  the rerun failed: RuntimeError: broken now")
+
+
+# --- demo ---------------------------------------------------------------------------------------
+
+def test_demo_needs_scikit_learn(tmp_path, capsys, monkeypatch):
+    monkeypatch.setitem(sys.modules, "sklearn.datasets", None)       # as if it weren't installed
+    assert main(["demo", str(tmp_path / "demo")]) == 2
+    assert 'the demo needs scikit-learn and NumPy (sklearn.datasets is missing): pip install' in capsys.readouterr().err
