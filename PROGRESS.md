@@ -2,11 +2,75 @@
 
 ## Status
 
-**Milestone 3 of 6 complete: reading runs.** Next: milestone 4, `rerun`, the demo task and measured
-nondeterminism. The plan is in
+**Milestone 4 of 6 complete: reproduction.** Next: milestone 5, parameter sweeps with bounded
+parallel workers. The plan is in
 [`docs/design.md`](docs/design.md).
 
 ## Milestones
+
+### Milestone 4: reproduction
+
+- **`exprun rerun RUN [--tolerance REL] [--allow-code-change]`** re-runs from the manifest: the saved
+  config bytes, the recorded overrides and seed (even a drawn one). It refuses, with exit code 2:
+  - a run that didn't succeed;
+  - changed or missing data;
+  - changed code (the task's source, the git commit, or uncommitted edits anywhere in the
+    repository), unless `--allow-code-change`.
+
+  It reports one of these outcomes:
+  - identical;
+  - metrics identical, outputs differ;
+  - within tolerance (metrics only, compared as numbers);
+  - different;
+  - failed.
+
+  It lists the metric changes, differing output files and other differences (code, Python,
+  packages, recorded variables). When nothing recorded differs, it says the task itself isn't
+  deterministic. It exits 0 if reproduced and 3 if not, and the rerun's manifest records
+  `rerun_of` and the judgement, which `exprun show` displays.
+- **`exprun demo FOLDER`** writes handwritten digits from scikit-learn (the UCI dataset, CC BY 4.0,
+  with its citation) and two configs, logistic regression and a random forest. The task
+  `exprun.demo:train` splits with the run's seed, reports accuracy, macro F1, log loss and
+  convergence, and writes every probability at 17 significant digits, so the byte comparison
+  sees last-bit changes. The demo needs the optional `demo` extra, which CI now installs.
+- **NumPy scalar metrics** (float64, float32, int64, bool_) are converted to plain values with
+  `.item()`, which is exact. Arrays are refused with a hint.
+- **Measured** (`scripts/nondeterminism.py`, written up in `docs/reproducibility.md`):
+  - plain reruns are identical;
+  - a random forest on 2 cores never repeats its last bits (9 runs, 9 different probability files,
+    at most 2 ULP, metrics identical), while on 1 core it repeats exactly;
+  - scikit-learn 1.8.0 versus 1.9.1 changes logistic regression's probabilities (1,164 of 4,500,
+    up to 60 ULP) but no metric;
+  - Python's default random hash seed gives 4 distinct results in 10 runs of an order-dependent
+    task, against 5 identical ones under exprun;
+  - two BLAS threads changed nothing here.
+- **Fixed while building:**
+  - **Stale bytecode** (the `fix:` commit). An edit to the task that kept its size, within the same
+    second as the previous compile, ran the old code while the manifest recorded the new source's
+    hash. Python's bytecode cache trusts the modification time in seconds plus the size. A flaky
+    test exposed it; a deterministic test now forces an identical timestamp. The task module is
+    compiled in checked-hash mode (PEP 552) before import.
+  - **NumPy scalars were inconsistent:** `numpy.float64` (a `float` subclass) was accepted while
+    `float32` and `int64` were refused. Installing NumPy un-skipped the test that showed it.
+  - **A rerun's report first sliced the printed `compare` page,** which would break with any layout
+    change. It now shares the comparison's section function.
+  - **One of my tests could have failed about once in a thousand runs** (a random metric near 0
+    against a 0.999 tolerance). The random values are now bounded.
+
+**Tests (262):**
+- Every outcome and boundary of the judgement, and every refusal, with real runs: changed data,
+  changed code, a new commit, other uncommitted edits, a failed original, a vanished task.
+- Saved-config, override and seed reuse; `rerun` end to end, including a task that ignores its
+  seed, a failed rerun, and environment differences.
+- The demo end to end (export, both models, reruns, full precision, convergence), and its
+  message when scikit-learn is missing.
+
+**Mutation-checked:** 29 deliberate bugs. 23 were caught at once and 6 survived:
+- 5 were test gaps, now closed: the git-commit and other-uncommitted-edit checks, the tolerance
+  boundary, the overrides recorded in a rerun, and the demo's full precision and convergence
+  metric.
+- 1 was a branch that couldn't be reached, since loading the config already refuses missing
+  inputs. I removed it.
 
 ### Milestone 3: reading runs
 
@@ -195,6 +259,8 @@ exprun run path/to/experiment.toml --set model.C=10 --timeout 60
 exprun list --status succeeded
 exprun show latest
 exprun compare 20261112T0229 latest
+exprun demo demo && cd demo && exprun run logistic.toml && exprun rerun latest
+python scripts/nondeterminism.py --other-python /path/to/env-with-scikit-learn-1.8/bin/python
 ```
 
 ## Concepts to review
@@ -209,3 +275,5 @@ exprun compare 20261112T0229 latest
 - `wait4` and per-child resource usage; buffered output on pipes.
 - Why "same fingerprint, different metrics" is the interesting case: something unrecorded changed
   the result.
+- Floating-point addition isn't associative, so parallel reductions vary in the last bits; ULPs.
+- Python's hash randomization, and bytecode cache validation (timestamp versus hash, PEP 552).
