@@ -2,10 +2,74 @@
 
 ## Status
 
-**Milestone 1 of 6 complete: config and hashing.** Next: milestone 2, the runner. The plan is in
+**Milestone 2 of 6 complete: the runner.** Next: milestone 3, `list`, `show` and `compare`. The plan is in
 [`docs/design.md`](docs/design.md).
 
 ## Milestones
+
+### Milestone 2: the runner
+
+- **`exprun run CONFIG [--set KEY=VALUE] [--runs DIR] [--timeout S] [--quiet]`** runs the task and
+  records the run in `runs/<YYYYMMDDTHHMMSSZ>-<fingerprint prefix>/`. The folder holds:
+  - `manifest.json`;
+  - the config's exact bytes;
+  - `stdout.log` and `stderr.log`;
+  - `outputs/`.
+
+  It exits 0 if the run succeeded and 1 if it failed or was interrupted.
+- **The manifest records:** status, spec (task, seed and where it came from, params), config hash,
+  inputs (content hashes), code version, fingerprint, environment, start and end times, duration,
+  exit code or signal, metrics or the error (with a traceback trimmed to the task's own frames),
+  output file hashes, and the task's CPU time and peak memory.
+- **The task runs in a child process,** in the config's folder, with `PYTHONHASHSEED=0` and
+  unbuffered output. It returns a flat dict of finite numbers, booleans or strings; anything else
+  fails the run with a reason, including a hint for NumPy values. A task that raises, calls
+  `sys.exit`, ends without reporting, or is killed is recorded as failed, with its cause.
+- **Atomic manifest writes:** temporary file, fsync, rename, then fsync of the folder. A test
+  makes the rename fail and checks that the old manifest survives and no temporary file is left.
+- **Liveness by lock.** The runner holds an `flock` and passes it to the task's process, so a run
+  counts as in progress until both have ended. "running" with a free lock means the runner died,
+  and `reconcile` records that under the lock.
+- **Stopping:**
+  - Ctrl-C reaches the task, which records its interruption.
+  - SIGTERM to the runner alone is passed on to the task.
+  - A time limit sends SIGTERM.
+  - A task that ignores these gets SIGTERM and then SIGKILL after 5-second grace periods; a second
+    Ctrl-C kills it at once.
+- **Environment capture:** Python, platform, CPU count, every installed package (with names
+  normalized), and only a fixed list of variables that can change results (thread counts,
+  `PYTHONHASHSEED`). Nothing else from the environment is recorded, since it may hold secrets.
+- **Fixed while building:**
+  - **The task's stdout arrived only when it ended,** because Python buffers output to a pipe.
+    `PYTHONUNBUFFERED` is now set for the task.
+  - **Reaping the task with `os.wait4`** (for its own resource usage) left `subprocess.Popen`
+    believing it still ran. The test suite's ResourceWarning-as-error setting caught it, and the
+    exit code is now handed back to `Popen`.
+  - **Tracebacks began inside exprun's own code;** they now start at the task.
+- **Verified before relying on them:** an inherited `flock` stays held until the child ends;
+  `wait4` reports that one child's usage; `ru_maxrss` is in KiB on Linux and bytes on macOS.
+
+**Tests (181, one skipped until NumPy is installed in milestone 4):**
+- Success, outputs in subfolders, logs, live echo and `--quiet`.
+- The working folder, `PYTHONHASHSEED`, the manifest reading "running" during the run, drawn seeds.
+- Six kinds of task failure, an import error, time limits, and an invalid config creating no run.
+- A failure of the runner itself, run ids in the same second, atomic writes, and every effective
+  status.
+- **Real signals:** Ctrl-C to the process group, SIGTERM to the runner alone, a double Ctrl-C, a
+  task ignoring SIGTERM, and `kill -9` of the runner while its task still runs. Run 10 times in a
+  row without a failure.
+
+**Mutation-checked:** 34 deliberate bugs. 28 were caught at once, and the 6 survivors were all
+test gaps, now closed:
+- **A race in `reconcile`:** without re-reading under the lock, a run that finished just before
+  could be overwritten as interrupted. A test now simulates that stale first read.
+- **This machine sets `PYTHONUNBUFFERED=1` globally,** so the live-log test couldn't fail here. The
+  test now removes it.
+- **SIGTERM forwarding had no time bound,** and the grace stage made up for its absence. Now it
+  must take under 3 s.
+- **The config folder on the import path** mattered only with `PYTHONSAFEPATH=1`, which is now
+  tested.
+- **Listing order** depended on the filesystem, and **package-name normalization** was unchecked.
 
 ### Milestone 1: config and hashing
 
@@ -83,6 +147,7 @@ python -m pip install -e ".[dev]"
 python -m ruff check src tests
 python -m pytest
 exprun check path/to/experiment.toml --set model.C=10   (verified on example configs in a temporary folder)
+exprun run path/to/experiment.toml --set model.C=10 --timeout 60
 ```
 
 ## Concepts to review
@@ -91,3 +156,7 @@ exprun check path/to/experiment.toml --set model.C=10   (verified on example con
 - Canonical serialization: why key order and float formatting must be fixed before hashing.
 - Finding a module without importing it (`PathFinder`), and why checking a config shouldn't run code.
 - What `git diff HEAD` covers that `git diff` doesn't; why untracked files stay out of the fingerprint.
+- Atomic writes (temp file, fsync, rename, fsync the folder) and what each step protects against.
+- `flock`: why a lock the OS releases on death detects a killed process, and why the child shares it.
+- Process groups and signals: why Ctrl-C reaches the task but SIGTERM to the runner doesn't.
+- `wait4` and per-child resource usage; buffered output on pipes.
