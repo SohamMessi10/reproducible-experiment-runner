@@ -36,11 +36,16 @@ MANIFEST = "manifest.json"
 LOCK = ".lock"
 SCHEMA = 1
 RUN_ID = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}(?:-\d+)?")
+_ID_PREFIX = re.compile(r"[0-9TZa-f-]+")
 STATUSES = ("running", "succeeded", "failed", "interrupted")
 
 
 class RunNotFound(LookupError):
     pass
+
+
+class ManifestError(ValueError):
+    """A manifest that isn't JSON, or is from a newer version of exprun."""
 
 
 def now() -> datetime:
@@ -88,11 +93,20 @@ class RunFolder:
         return self.path / "outputs"
 
     def read(self) -> dict | None:
-        """The manifest, or None if the run is so new (or so broken) that it has none yet."""
+        """The manifest, or None if the run is so new (or so broken) that it has none yet. A manifest
+        that can't be parsed, or that a newer exprun wrote, raises ManifestError."""
         try:
-            return json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ManifestError(f"{self.manifest_path} isn't readable JSON ({exc})") from None
+        if not isinstance(data, dict):
+            raise ManifestError(f"{self.manifest_path} isn't a manifest")
+        if data.get("schema", SCHEMA) != SCHEMA:
+            raise ManifestError(f"{self.manifest_path} has schema version {data.get('schema')!r}; this exprun "
+                                f"reads version {SCHEMA}")
+        return data
 
     def write(self, manifest: dict) -> None:
         write_json_atomic(self.manifest_path, manifest)
@@ -189,8 +203,37 @@ class RunStore:
             raise RunNotFound(f"no run {run_id} in {self.root}")
         return RunFolder(path)
 
+    def resolve(self, reference: str) -> RunFolder:
+        """A run by full id, by a prefix of exactly one id, or "latest" (the newest run)."""
+        runs = self.all()
+        if reference == "latest":
+            if not runs:
+                raise RunNotFound(f"no runs in {self.root} yet")
+            return runs[-1]
+        if RUN_ID.fullmatch(reference):
+            return self.get(reference)
+        if not _ID_PREFIX.fullmatch(reference):
+            raise RunNotFound(f"{reference!r} isn't a run id (they look like 20261111T235959Z-3f2a9c)")
+        matches = [run for run in runs if run.id.startswith(reference)]
+        if not matches:
+            raise RunNotFound(f"no run in {self.root} starts with {reference}")
+        if len(matches) > 1:
+            shown = ", ".join(run.id for run in matches[:5]) + (", ..." if len(matches) > 5 else "")
+            raise RunNotFound(f"{reference} matches {len(matches)} runs ({shown}); give more of the id")
+        return matches[0]
+
     def all(self) -> list[RunFolder]:
-        """Every run, oldest first (ids sort by time)."""
+        """Every run, oldest first. An id carries its start time only to the second, so runs started
+        within the same second are ordered by the microsecond start time in their manifests."""
         if not self.root.is_dir():
             return []
-        return [RunFolder(p) for p in sorted(self.root.iterdir()) if p.is_dir() and RUN_ID.fullmatch(p.name)]
+        runs = [RunFolder(p) for p in self.root.iterdir() if p.is_dir() and RUN_ID.fullmatch(p.name)]
+        return sorted(runs, key=_start_order)
+
+
+def _start_order(folder: RunFolder) -> tuple[str, str, str]:
+    try:
+        manifest = folder.read() or {}
+    except ManifestError:
+        manifest = {}
+    return folder.id[:16], str(manifest.get("started_at") or ""), folder.id

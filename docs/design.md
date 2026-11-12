@@ -44,8 +44,17 @@ rather than assumed.
   - captures stdout and stderr, and on failure keeps the run and the error.
 - A run killed outright (power loss, `kill -9`) is recognized as interrupted, not left "running"
   forever.
-- `exprun list`, `exprun show RUN` and `exprun compare RUN RUN ...`. Compare shows only the
-  config values that differ, plus metrics, data hashes and environment differences.
+- `exprun list`, `exprun show RUN` and `exprun compare RUN RUN ...`.
+  - **List:** newest first, filterable. It records runs whose runner died as interrupted.
+  - **Compare** opens with a one-line verdict:
+    - the same fingerprint and the same metrics;
+    - the same fingerprint but *different* metrics, so something outside config, data and code
+      changed the result;
+    - or which of the config, the inputs' content and the code differ.
+
+    Then it shows only the values that differ (params by dotted path, seed, input hashes, code
+    version, Python, platform, packages, recorded variables), and every metric with its change from
+    the first run.
 - `exprun rerun RUN` re-executes from the manifest, refuses if the inputs' content has changed, and
   reports what reproduced:
   - metrics: exactly, or only within a tolerance;
@@ -143,6 +152,9 @@ runs/<run-id>/
 
 - **Run id:** `YYYYMMDDTHHMMSSZ-<first 6 hex of the fingerprint>`. It sorts by time and hints at
   identity; a suffix makes it unique when needed.
+  - An id holds time only to the second, so runs started within one second are ordered by the
+    microsecond start time in their manifests.
+  - Commands accept a full id, a unique start of one, or `latest`.
 - **The manifest has a schema version,** so later versions can read older runs or refuse them
   clearly.
 

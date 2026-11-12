@@ -2,10 +2,54 @@
 
 ## Status
 
-**Milestone 2 of 6 complete: the runner.** Next: milestone 3, `list`, `show` and `compare`. The plan is in
+**Milestone 3 of 6 complete: reading runs.** Next: milestone 4, `rerun`, the demo task and measured
+nondeterminism. The plan is in
 [`docs/design.md`](docs/design.md).
 
 ## Milestones
+
+### Milestone 3: reading runs
+
+- **`exprun list [--experiment NAME] [--status S] [--limit N] [--json]`** shows runs newest first,
+  with each run's status, start time, duration and first metrics.
+  - It records runs whose runner died as interrupted.
+  - An unreadable manifest is listed as "unreadable" instead of stopping the listing.
+  - With no runs, it says how to start one.
+- **`exprun show RUN [--json]`** shows the whole run: the status (noting when it differs from what
+  was recorded), experiment, timing, config and overrides, task and code version, seed and whether
+  it was drawn, fingerprint, params, inputs, metrics, outputs, resources, environment, and the
+  error with the end of its traceback.
+- **`exprun compare RUN RUN ... [--all] [--json]`** opens with a verdict:
+  - the same fingerprint and the same metrics ("the two runs reproduce");
+  - the same fingerprint but DIFFERENT metrics;
+  - or which of the config, the inputs' content and the code differ.
+
+  Then it shows only differing values, side by side under labels A, B, C...:
+  - params by dotted path, printed as JSON so 1, 1.0 and "1" are distinct;
+  - seed, input content hashes, code version;
+  - Python, platform, package versions and recorded variables.
+
+  Every metric is listed with its change from run A. Booleans and strings get no change figure.
+- **Runs are named** by full id, a unique start of one, or `latest`. An ambiguous start lists the
+  matches. Anything that isn't id-shaped is refused, so a reference can't reach outside the runs
+  folder.
+- **Manifests are read defensively.** Invalid JSON, a non-object, or a newer schema version raise a
+  clear error, so a run from a later exprun is refused rather than misread.
+- **Fixed while building:** runs started within the same second (easy with fast tasks) were ordered
+  by fingerprint, since ids hold time only to the second, so `latest` could pick the wrong run.
+  Runs are now ordered by the microsecond start time in their manifests. The verdict's grammar
+  was also fixed ("the config differs").
+
+**Tests (222, one skipped until NumPy is installed):**
+- The report functions on hand-built manifests: every verdict, hidden and `--all` rows, type-aware
+  equality, metric changes, and both page layouts.
+- Store lookup by prefix and `latest`, same-second ordering, and broken manifests.
+- Every command with real runs: empty, filtered, limited and JSON listings; reconciling a dead
+  run; a corrupt, a newer-schema and a missing manifest; three-way comparisons.
+
+**Mutation-checked:** 27 deliberate bugs. 25 were caught at once. The 2 survivors were test gaps,
+now closed: a metric that is `1` in one run and `true` in another, and the quote-free printing of
+hashes next to quoted string params.
 
 ### Milestone 2: the runner
 
@@ -148,6 +192,9 @@ python -m ruff check src tests
 python -m pytest
 exprun check path/to/experiment.toml --set model.C=10   (verified on example configs in a temporary folder)
 exprun run path/to/experiment.toml --set model.C=10 --timeout 60
+exprun list --status succeeded
+exprun show latest
+exprun compare 20261112T0229 latest
 ```
 
 ## Concepts to review
@@ -160,3 +207,5 @@ exprun run path/to/experiment.toml --set model.C=10 --timeout 60
 - `flock`: why a lock the OS releases on death detects a killed process, and why the child shares it.
 - Process groups and signals: why Ctrl-C reaches the task but SIGTERM to the runner doesn't.
 - `wait4` and per-child resource usage; buffered output on pipes.
+- Why "same fingerprint, different metrics" is the interesting case: something unrecorded changed
+  the result.
