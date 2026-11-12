@@ -94,9 +94,23 @@ environment ─► capture (Python, platform, packages, thread settings)
   - A crashing or hanging task can't corrupt the runner's records.
   - stdout and stderr can be captured.
   - Each run starts from a fresh interpreter, so state doesn't leak between runs.
-- **Liveness by lock, not by guess.** The runner holds an OS file lock (`flock`) on the run for as
-  long as it runs. The OS releases the lock when the process dies, however it dies. So a run marked
-  "running" whose lock can be taken has been interrupted.
+- **Liveness by lock, not by guess.**
+  - The runner holds an OS file lock (`flock`) on the run, and passes it to the task's process, so
+    it stays held until *both* have ended.
+  - The OS releases the lock when the last holder dies, however it dies.
+  - So a run marked "running" whose lock can be taken has been interrupted. Readers report it as
+    such, and `reconcile` records it, taking the lock first so it can't race a live runner.
+  - Two cases are told apart: a runner killed with `kill -9` while its task is still running stays
+    "running" until the task ends, because the run isn't over yet.
+- **Stopping.**
+  - Ctrl-C reaches the whole process group. The task records its own interruption, and the runner
+    waits for it.
+  - SIGTERM reaches only the runner, which passes it on.
+  - A time limit sends SIGTERM.
+  - If the task hasn't ended within a grace period (5 s), it gets SIGTERM, then SIGKILL. A second
+    Ctrl-C kills it at once.
+- **Resource usage** comes from `wait4`, which reports the task process's own CPU time and peak
+  memory. Peak memory is in bytes on macOS and KiB on Linux, and is converted to bytes.
 - **Atomic writes.** The manifest is written to a temporary file, flushed to disk and renamed over
   the old one, so a reader sees either the old version or the new one, never half of each.
 
@@ -124,7 +138,7 @@ runs/<run-id>/
   config.toml     the config exactly as given (bytes preserved)
   stdout.log, stderr.log
   outputs/        files the task writes; each one's hash is recorded at the end
-  .lock           held while the run is in progress
+  .lock           held (flock) by the runner and the task while the run is in progress
 ```
 
 - **Run id:** `YYYYMMDDTHHMMSSZ-<first 6 hex of the fingerprint>`. It sorts by time and hints at
@@ -135,8 +149,10 @@ runs/<run-id>/
 ## Reproducibility rules
 
 - **Seed.** The config's `seed` is passed to the task. If there is none, the runner draws one,
-  records it and passes it, so every run can be re-run. `PYTHONHASHSEED` is fixed in the child,
-  so `str` hashing (and set iteration order) is repeatable.
+  records it and passes it, so every run can be re-run. `PYTHONHASHSEED` is fixed to 0 in the
+  child, so `str` hashing (and set iteration order) is repeatable.
+  `PYTHONUNBUFFERED` is set too, so the task's output is logged as it is printed. It doesn't
+  affect results.
 - **Identity.** fingerprint = SHA-256 of the canonical config, input hashes and code version.
   - Two runs with the same fingerprint *should* match.
   - Different data can't pass as the same run: data is hashed by content, not by name.
