@@ -189,3 +189,139 @@ def test_run_reports_an_unreadable_config_and_an_unwritable_runs_folder(project,
     (project.root / "blocker").write_text("a file, not a folder")
     assert main(["run", str(project.write()), "--runs", str(project.root / "blocker" / "runs")]) == 1
     assert "exprun: " in capsys.readouterr().err
+
+
+# --- list, show, compare ------------------------------------------------------------------------
+
+def make_run(project, *extra, task="train", config="exp.toml"):
+    args = ["run", str(project.write(task, name=config)), "--runs", str(project.root / "runs"), "--quiet", *extra]
+    main(args)
+    return RunStore(project.root / "runs").all()[-1].id
+
+
+def runs_args(project):
+    return ["--runs", str(project.root / "runs")]
+
+
+def test_list_with_no_runs_says_how_to_start(project, capsys):
+    assert main(["list", *runs_args(project)]) == 0
+    assert capsys.readouterr().out == f"no runs in {project.root / 'runs'}: start one with `exprun run CONFIG`\n"
+
+
+def test_list_shows_runs_newest_first(project, capsys):
+    first = make_run(project)
+    second = make_run(project, "--set", "C=2.0")
+    failed = make_run(project, task="boom", config="boom.toml")
+    capsys.readouterr()
+    assert main(["list", *runs_args(project)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].split() == ["RUN", "EXPERIMENT", "STATUS", "STARTED", "(UTC)", "DURATION", "METRICS"]
+    assert [line.split()[0] for line in lines[1:]] == [failed, second, first]
+    assert lines[1].split()[2] == "failed" and "accuracy=0.9  rows=4  seed=42" in lines[2]
+
+
+def test_list_filters_and_limits(project, capsys):
+    make_run(project)
+    make_run(project)
+    make_run(project, task="boom", config="boom.toml")
+    capsys.readouterr()
+    assert main(["list", *runs_args(project), "--status", "failed"]) == 0
+    assert len(capsys.readouterr().out.splitlines()) == 2
+    assert main(["list", *runs_args(project), "--limit", "1"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 3 and out[-1] == "(showing the newest 1 of 3; --limit 0 shows all)"
+    assert main(["list", *runs_args(project), "--experiment", "other"]) == 0
+    assert capsys.readouterr().out.startswith("no runs matching those filters in ")
+    assert main(["list", *runs_args(project), "--limit", "-1"]) == 2
+
+
+def test_list_as_json(project, capsys):
+    run_id = make_run(project)
+    capsys.readouterr()
+    assert main(["list", *runs_args(project), "--json"]) == 0
+    (record,) = json.loads(capsys.readouterr().out)
+    assert record["id"] == run_id and record["status"] == "succeeded" and record["metrics"]["rows"] == 4
+
+
+def test_list_records_a_dead_runner_and_survives_a_broken_manifest(project, capsys):
+    dead = make_run(project)
+    folder = RunStore(project.root / "runs").get(dead)
+    folder.write({**folder.read(), "status": "running"})        # as if the runner had been killed
+    broken = make_run(project)
+    (project.root / "runs" / broken / "manifest.json").write_text("{oops")
+    capsys.readouterr()
+    assert main(["list", *runs_args(project)]) == 0
+    out = capsys.readouterr().out
+    assert f"{broken}  –           unreadable" in out and "interrupted" in out
+    assert folder.read()["status"] == "interrupted" and folder.read()["error"]["type"] == "RunnerDied"
+
+
+def test_show_by_prefix_or_latest(project, capsys):
+    run_id = make_run(project)
+    capsys.readouterr()
+    for reference in (run_id, run_id[:18], "latest"):
+        assert main(["show", reference, *runs_args(project)]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith(f"run         {run_id}\nstatus      succeeded\n") and "  accuracy  0.9" in out
+    assert main(["show", "latest", *runs_args(project), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == run_id
+
+
+@pytest.mark.parametrize("reference, code, message", [
+    ("2099", 2, "no run in"),
+    ("../etc", 2, "isn't a run id"),
+])
+def test_show_refuses_unknown_runs(project, capsys, reference, code, message):
+    make_run(project)
+    capsys.readouterr()
+    assert main(["show", reference, *runs_args(project)]) == code
+    assert message in capsys.readouterr().err
+
+
+def test_show_and_compare_report_broken_and_incomplete_runs(project, capsys):
+    good = make_run(project)
+    broken = make_run(project)
+    (project.root / "runs" / broken / "manifest.json").write_text('{"schema": 99}')
+    capsys.readouterr()
+    assert main(["show", broken, *runs_args(project)]) == 1
+    assert "has schema version 99" in capsys.readouterr().err
+    assert main(["compare", good, broken, *runs_args(project)]) == 1
+    (project.root / "runs" / broken / "manifest.json").unlink()
+    assert main(["show", broken, *runs_args(project)]) == 1
+    assert "has no manifest yet (incomplete)" in capsys.readouterr().err
+
+
+def test_compare_shows_what_differs(project, capsys):
+    first = make_run(project)
+    second = make_run(project)
+    changed = make_run(project, "--set", "C=2.0")
+    capsys.readouterr()
+    assert main(["compare", first, second, *runs_args(project)]) == 0
+    assert "same fingerprint and the same metrics: the two runs reproduce" in capsys.readouterr().out
+    assert main(["compare", first, changed, *runs_args(project)]) == 0
+    out = capsys.readouterr().out
+    assert "different fingerprints: the config differs" in out and "  C  1.0  2.0" in out
+    assert main(["compare", first, second, "latest", *runs_args(project)]) == 0     # latest is the changed run
+    out = capsys.readouterr().out
+    assert f"  C  {changed}" in out and "     A    B    C\n  C  1.0  1.0  2.0" in out
+
+
+def test_compare_needs_two_different_runs(project, capsys):
+    run_id = make_run(project)
+    capsys.readouterr()
+    assert main(["compare", run_id, *runs_args(project)]) == 2
+    assert "needs at least two runs" in capsys.readouterr().err
+    assert main(["compare", run_id, "latest", *runs_args(project)]) == 2
+    assert "the same run is named twice" in capsys.readouterr().err
+
+
+def test_compare_as_json_has_no_placeholders(project, capsys):
+    first = make_run(project)
+    second = make_run(project, "--set", "C=2.0")
+    capsys.readouterr()
+    assert main(["compare", first, second, *runs_args(project), "--json", "--all"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["runs"] == [first, second] and data["same_fingerprint"] is False
+    assert data["differing_parts"] == ["config"]
+    params = {row["key"]: row for row in data["sections"]["params"]["rows"]}
+    assert params["C"]["values"] == [1.0, 2.0] and params["C"]["same"] is False and params["sleep"]["same"] is True

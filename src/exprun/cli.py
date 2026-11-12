@@ -34,6 +34,25 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
     run.add_argument("--timeout", type=float, metavar="SECONDS", help="stop the task after this long")
     run.add_argument("--quiet", action="store_true", help="don't echo the task's output (it is still logged)")
+
+    listing = commands.add_parser("list", help="list runs, newest first")
+    listing.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    listing.add_argument("--experiment", metavar="NAME", help="only runs of this experiment")
+    listing.add_argument("--status", choices=["running", "succeeded", "failed", "interrupted"],
+                         help="only runs with this status")
+    listing.add_argument("--limit", type=int, default=20, metavar="N", help="show at most N runs (0: all; default 20)")
+    listing.add_argument("--json", action="store_true", help="print the runs as JSON")
+
+    show = commands.add_parser("show", help="show one run in full")
+    show.add_argument("run", help="a run id, a unique start of one, or 'latest'")
+    show.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    show.add_argument("--json", action="store_true", help="print the manifest")
+
+    compare = commands.add_parser("compare", help="show what differs between runs")
+    compare.add_argument("runs_to_compare", nargs="+", metavar="RUN", help="two or more runs (ids, unique starts, 'latest')")
+    compare.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    compare.add_argument("--all", action="store_true", help="also show values that are the same")
+    compare.add_argument("--json", action="store_true", help="print the comparison as JSON")
     return parser
 
 
@@ -141,11 +160,124 @@ def run_command(args) -> int:
     return EXIT_OK if status == "succeeded" else EXIT_FAILED
 
 
+def list_command(args) -> int:
+    from exprun.report import LIST_HEADER, list_row, table
+    from exprun.store import ManifestError, RunStore
+
+    if args.limit < 0:
+        print("exprun: --limit must be 0 (all) or more", file=sys.stderr)
+        return EXIT_USAGE
+    store = RunStore(args.runs)
+    rows, records = [], []
+    for folder in reversed(store.all()):
+        try:
+            manifest = folder.reconcile()       # records runs whose runner died as interrupted
+            status = folder.effective_status(manifest)
+        except ManifestError:
+            manifest, status = None, "unreadable"
+        if args.experiment and (manifest is None or manifest["experiment"]["name"] != args.experiment):
+            continue
+        if args.status and status != args.status:
+            continue
+        rows.append(list_row(folder.id, manifest, status))
+        records.append({"id": folder.id, "status": status, "experiment": manifest and manifest["experiment"]["name"],
+                        "started_at": manifest and manifest.get("started_at"),
+                        "duration_s": manifest and manifest.get("duration_s"),
+                        "metrics": manifest and manifest.get("metrics"), "fingerprint": manifest and manifest["fingerprint"]})
+    total = len(rows)
+    if args.limit:
+        rows, records = rows[: args.limit], records[: args.limit]
+    if args.json:
+        print(json.dumps(records, indent=1, ensure_ascii=False))
+        return EXIT_OK
+    if not rows:
+        filtered = " matching those filters" if args.experiment or args.status else ""
+        print(f"no runs{filtered} in {store.root}" + ("" if filtered else ": start one with `exprun run CONFIG`"))
+        return EXIT_OK
+    for line in table(rows, header=LIST_HEADER):
+        print(line)
+    if total > len(rows):
+        print(f"(showing the newest {len(rows)} of {total}; --limit 0 shows all)")
+    return EXIT_OK
+
+
+def _load_runs(store, references):
+    """(folder, manifest, status) for each reference, or an error message and exit code."""
+    from exprun.store import ManifestError, RunNotFound
+
+    found = []
+    for reference in references:
+        try:
+            folder = store.resolve(reference)
+        except RunNotFound as exc:
+            return None, (str(exc), EXIT_USAGE)
+        try:
+            manifest = folder.reconcile()
+        except ManifestError as exc:
+            return None, (str(exc), EXIT_FAILED)
+        if manifest is None:
+            return None, (f"run {folder.id} has no manifest yet ({folder.effective_status()})", EXIT_FAILED)
+        found.append((folder, manifest, folder.effective_status(manifest)))
+    return found, None
+
+
+def show_command(args) -> int:
+    from exprun.report import show_lines
+    from exprun.store import RunStore
+
+    found, error = _load_runs(RunStore(args.runs), [args.run])
+    if error:
+        print(f"exprun: {error[0]}", file=sys.stderr)
+        return error[1]
+    folder, manifest, status = found[0]
+    if args.json:
+        print(json.dumps(manifest, indent=1, ensure_ascii=False))
+        return EXIT_OK
+    for line in show_lines(manifest, status, str(folder.path)):
+        print(line)
+    return EXIT_OK
+
+
+def compare_command(args) -> int:
+    from exprun.report import ABSENT, compare, compare_lines
+    from exprun.store import RunStore
+
+    if len(args.runs_to_compare) < 2:
+        print("exprun: compare needs at least two runs", file=sys.stderr)
+        return EXIT_USAGE
+    found, error = _load_runs(RunStore(args.runs), args.runs_to_compare)
+    if error:
+        print(f"exprun: {error[0]}", file=sys.stderr)
+        return error[1]
+    if len({folder.id for folder, _, _ in found}) < len(found):
+        print("exprun: the same run is named twice", file=sys.stderr)
+        return EXIT_USAGE
+    manifests = [manifest for _, manifest, _ in found]
+    if args.json:
+        result = compare(manifests, args.all)
+
+        def plain(value):
+            return None if value is ABSENT else value
+
+        for section in result["sections"].values():
+            for row in section["rows"]:
+                row["values"] = [plain(v) for v in row["values"]]
+        for metric in result["metrics"]:
+            metric["values"] = [plain(v) for v in metric["values"]]
+        print(json.dumps({"runs": [m["id"] for m in manifests], **result}, indent=1, ensure_ascii=False))
+        return EXIT_OK
+    for line in compare_lines(manifests, [status for _, _, status in found], args.all):
+        print(line)
+    return EXIT_OK
+
+
+COMMANDS = {"check": check_command, "run": run_command, "list": list_command, "show": show_command,
+            "compare": compare_command}
+
+
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "run":
-        return run_command(args)
-    return check_command(args)
+    return COMMANDS[args.command](args)
 
 
 def main() -> None:
