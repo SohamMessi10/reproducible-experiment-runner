@@ -151,3 +151,54 @@ def test_runs_are_listed_oldest_first_whatever_order_the_filesystem_gives(tmp_pa
     real_iterdir = Path.iterdir
     monkeypatch.setattr(Path, "iterdir", lambda self: reversed(list(real_iterdir(self))))
     assert [f.id for f in store.all()] == ids
+
+
+def make_runs(store, count, second=AT.second):
+    folders = []
+    for i in range(count):
+        folder, lock = store.create(FP, AT.replace(second=second))
+        folder.write({"schema": 1, "status": "succeeded", "started_at": f"2026-11-11T23:59:{second:02d}.{900000 - i:06d}Z"})
+        lock.release()
+        folders.append(folder)
+    return folders
+
+
+def test_runs_started_in_the_same_second_are_ordered_by_their_recorded_start(tmp_path):
+    store = RunStore(tmp_path)
+    # Ids sort -2 after the base, but here each later-created run records an earlier start time.
+    folders = make_runs(store, 3)
+    assert [f.id for f in store.all()] == [folders[2].id, folders[1].id, folders[0].id]
+
+
+def test_resolve_by_id_prefix_or_latest(tmp_path):
+    store = RunStore(tmp_path)
+    with pytest.raises(RunNotFound, match="no runs in"):
+        store.resolve("latest")
+    old = make_runs(store, 1, second=10)[0]
+    new = make_runs(store, 1, second=20)[0]
+    assert store.resolve("latest").id == new.id
+    assert store.resolve(old.id).id == old.id
+    assert store.resolve("20261111T235910").id == old.id
+    with pytest.raises(RunNotFound, match="20261111T2359 matches 2 runs .* give more of the id"):
+        store.resolve("20261111T2359")
+    with pytest.raises(RunNotFound, match="no run in .* starts with 2027"):
+        store.resolve("2027")
+    for bad in ("../x", "LATEST", "a b", ""):
+        with pytest.raises(RunNotFound, match="isn't a run id"):
+            store.resolve(bad)
+
+
+@pytest.mark.parametrize("content, message", [
+    ("{not json", "isn't readable JSON"),
+    ("[1, 2]", "isn't a manifest"),
+    ('{"schema": 2, "status": "succeeded"}', "has schema version 2; this exprun reads version 1"),
+])
+def test_unreadable_manifests_raise_a_clear_error(tmp_path, content, message):
+    from exprun.store import ManifestError
+
+    folder, lock = RunStore(tmp_path).create(FP, AT)
+    lock.release()
+    folder.manifest_path.write_text(content)
+    with pytest.raises(ManifestError, match=message):
+        folder.read()
+    assert [f.id for f in RunStore(tmp_path).all()] == [folder.id]      # still listed, not a crash
