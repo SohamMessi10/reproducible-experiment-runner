@@ -3,7 +3,9 @@
 "I set the seed" is a common answer to "can you reproduce this?". This page measures how far that
 answer gets on the demo, a scikit-learn classifier of handwritten digits. Each number comes from
 [`scripts/nondeterminism.py`](../scripts/nondeterminism.py), which drives the real `exprun` command
-in a fresh folder.
+in a fresh folder. The script was run twice, before and after the code was committed. Counts that
+depend on thread scheduling are given as the range over both runs; every outcome was the same both
+times.
 
 **Setup:** Linux, 2 CPUs, Python 3.13, scikit-learn 1.9.1, NumPy 2.5.4. The demo writes every
 predicted probability with 17 significant digits, so a change in the last bit of any of the 4,500
@@ -16,10 +18,10 @@ numbers (450 test images × 10 classes) makes its output file differ. Difference
 |---|---|---|---|
 | Nothing (logistic regression) | 5 | identical, 5 of 5 | none |
 | Nothing (random forest, `n_jobs=1`) | 5 | identical, 5 of 5 | none |
-| Nothing, but the forest runs on 2 cores (`n_jobs=2`) | 8 | **metrics identical, outputs differ**, 8 of 8 | 9 runs gave 9 different probability files; at most 7 of 4,500 values differ, by at most 2 ULP |
+| Nothing, but the forest runs on 2 cores (`n_jobs=2`) | 8 (twice) | **metrics identical, outputs differ**, 8 of 8 both times | each time, 9 runs gave 9 different probability files; at most 6 to 7 of 4,500 values differ, by at most 1 to 2 ULP |
 | BLAS threads 1 → 2 (logistic regression) | 3 | identical, 3 of 3 | none |
 | A task whose result depends on set order, under exprun | 5 | identical, 5 of 5 | none |
-| The same task run directly with Python's default random hash seed | 10 | — | 4 distinct results in 10 runs |
+| The same task run directly with Python's default random hash seed | 10 (twice) | — | 4 and 5 distinct results in 10 runs |
 | A task that ignores `ctx.seed` | 3 | **different**, 3 of 3 | its metric changes every run |
 | The data file, same name, one value changed | — | refused before running | the content hash changed |
 | scikit-learn 1.9.1 → 1.8.0 (random forest) | 1 | identical | none |

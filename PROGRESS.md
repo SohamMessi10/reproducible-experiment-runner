@@ -37,12 +37,13 @@ parallel workers. The plan is in
   `.item()`, which is exact. Arrays are refused with a hint.
 - **Measured** (`scripts/nondeterminism.py`, written up in `docs/reproducibility.md`):
   - plain reruns are identical;
-  - a random forest on 2 cores never repeats its last bits (9 runs, 9 different probability files,
-    at most 2 ULP, metrics identical), while on 1 core it repeats exactly;
+  - a random forest on 2 cores never repeats its last bits (in each of two measurements, 9 runs
+    gave 9 different probability files, at most 1 to 2 ULP apart, metrics identical), while on 1
+    core it repeats exactly;
   - scikit-learn 1.8.0 versus 1.9.1 changes logistic regression's probabilities (1,164 of 4,500,
     up to 60 ULP) but no metric;
-  - Python's default random hash seed gives 4 distinct results in 10 runs of an order-dependent
-    task, against 5 identical ones under exprun;
+  - Python's default random hash seed gives 4 and 5 distinct results in 10 runs (two measurements)
+    of an order-dependent task, against 5 identical ones under exprun;
   - two BLAS threads changed nothing here.
 - **Fixed while building:**
   - **Stale bytecode** (the `fix:` commit). An edit to the task that kept its size, within the same
