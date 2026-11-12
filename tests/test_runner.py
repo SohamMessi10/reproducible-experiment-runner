@@ -146,3 +146,18 @@ def test_the_manifest_is_valid_json_with_no_temporary_files_left(project):
 def test_the_task_is_found_even_when_python_leaves_the_working_folder_off_the_path(project, monkeypatch):
     monkeypatch.setenv("PYTHONSAFEPATH", "1")           # Python 3.11+: don't put the current folder on sys.path
     assert run(project)[1]["status"] == "succeeded"
+
+
+def test_an_edit_with_the_same_size_and_timestamp_still_runs_the_new_code(project):
+    # Python's bytecode cache trusts (mtime in seconds, size). Without a hash check, this edit would
+    # run the old code while the manifest records the new source's hash.
+    tasks = project.root / "tasks.py"
+    _, first = run(project)
+    stamp = tasks.stat().st_mtime_ns
+    tasks.write_text(tasks.read_text().replace('"accuracy": 0.9', '"accuracy": 0.8'))     # same size
+    import os
+
+    os.utime(tasks, ns=(stamp, stamp))
+    _, second = run(project)
+    assert first["metrics"]["accuracy"] == 0.9 and second["metrics"]["accuracy"] == 0.8
+    assert second["code"]["source_sha256"] != first["code"]["source_sha256"]
