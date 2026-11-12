@@ -252,7 +252,7 @@ test gaps, now closed:
 
 ```
 python -m pip install -e ".[dev]"
-python -m ruff check src tests
+python -m ruff check src tests scripts
 python -m pytest
 exprun check path/to/experiment.toml --set model.C=10   (verified on example configs in a temporary folder)
 exprun run path/to/experiment.toml --set model.C=10 --timeout 60
