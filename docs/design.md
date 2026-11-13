@@ -148,6 +148,8 @@ environment ─► capture (Python, platform, packages, thread settings)
   - **Stopping.** Only the main thread receives signals. On Ctrl-C or SIGTERM it stops handing out
     points and passes a stop request to every run in progress, which stops in the same stages as a
     single run; a second Ctrl-C kills them. Points that never started are reported as not started.
+    The main thread waits for its workers by a count they keep, not `Thread.join`, which before
+    Python 3.13 could misreport a thread as finished after an interrupted join.
     A task that reports its own Ctrl-C is recorded as interrupted even if its worker reaped it
     before seeing the request.
   - **Output.** With one worker, tasks echo their output as `exprun run` does. With more, it would

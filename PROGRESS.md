@@ -44,6 +44,12 @@ audit. The plan is in
     always equal to the config's, so nothing else changed.
   - **TOML refuses a raw DEL character in strings,** which JSON allows; Hypothesis found it in the
     function that writes grid values back as overrides. It now escapes for TOML.
+  - **On Python 3.12, a stopped sweep could lose a run still in progress** (the second `fix:`
+    commit). The sweep waited for its workers with `Thread.join`; before Python 3.13, a join
+    interrupted by Ctrl-C can leave `is_alive()` reporting False for a thread that is still running,
+    so the sweep ended early and called that point "not started". The real-signal test failed in 18
+    of 30 repetitions on 3.12 and never on 3.13. The workers now count themselves out and the main
+    thread polls that count; 0 failures in 30 repetitions on 3.12 since.
   - **A task can record its own Ctrl-C** while its worker thread reaps it before seeing the stop
     request. Such a run is now recorded as interrupted, not failed.
 
