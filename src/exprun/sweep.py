@@ -26,6 +26,7 @@ import queue
 import secrets
 import signal
 import threading
+import time as clock
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -204,6 +205,13 @@ def run(sweep: Sweep, runs: RunStore, *, workers: int, timeout: float | None = N
         return call
 
     def work() -> None:
+        try:
+            take_points()
+        finally:
+            with report:
+                running[0] -= 1
+
+    def take_points() -> None:
         while not stop.requested:
             try:
                 point = todo.get_nowait()
@@ -223,6 +231,7 @@ def run(sweep: Sweep, runs: RunStore, *, workers: int, timeout: float | None = N
                     on_done(outcome)
 
     threads = [threading.Thread(target=work, name=f"sweep-worker-{i}") for i in range(min(workers, len(sweep.points)))]
+    running = [len(threads)]          # workers not yet finished: counted by the workers themselves
 
     def terminated(signum, frame):
         raise Terminated()
@@ -231,10 +240,11 @@ def run(sweep: Sweep, runs: RunStore, *, workers: int, timeout: float | None = N
     try:
         for thread in threads:
             thread.start()
-        while any(thread.is_alive() for thread in threads):
+        # Polled with sleep, not Thread.join: before Python 3.13, a join interrupted by Ctrl-C could
+        # leave is_alive() False for a thread still running, and the sweep would end without its run.
+        while running[0] > 0:
             try:
-                for thread in threads:
-                    thread.join(0.05)
+                clock.sleep(0.05)
             except (KeyboardInterrupt, Terminated) as exc:
                 sweep.stopped = True
                 # Ctrl-C reached the tasks too (one process group); SIGTERM reached only us: pass it on.
