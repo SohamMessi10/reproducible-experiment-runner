@@ -158,6 +158,17 @@ def test_run_with_an_override_records_it(project, capsys):
     assert m["spec"]["params"]["C"] == 2.5 and m["config"]["overrides"] == ["C=2.5"]
 
 
+def test_run_works_with_relative_paths_from_another_folder(project, capsys, monkeypatch):
+    # The task runs in its config's folder: the run folder and inputs must still be found from there.
+    project.write()
+    (project.root / "work").mkdir()
+    monkeypatch.chdir(project.root / "work")
+    assert main(["run", "../exp.toml", "--quiet"]) == 0
+    (folder,) = RunStore(project.root / "work" / "runs").all()
+    assert folder.read()["metrics"]["rows"] == 4 and (folder.outputs / "model.txt").exists()
+    assert main(["show", "latest"]) == 0
+
+
 def test_a_failed_run_exits_1_with_the_error(project, capsys):
     assert main(["run", str(project.write("boom")), "--runs", str(project.root / "runs"), "--quiet"]) == 1
     err = capsys.readouterr().err
@@ -413,3 +424,4 @@ def test_demo_needs_scikit_learn(tmp_path, capsys, monkeypatch):
     monkeypatch.setitem(sys.modules, "sklearn.datasets", None)       # as if it weren't installed
     assert main(["demo", str(tmp_path / "demo")]) == 2
     assert 'the demo needs scikit-learn and NumPy (sklearn.datasets is missing): pip install' in capsys.readouterr().err
+
