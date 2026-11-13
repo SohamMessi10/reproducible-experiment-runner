@@ -13,14 +13,33 @@ from __future__ import annotations
 
 import importlib
 import json
+import py_compile
 import sys
 import traceback
+from contextlib import suppress
+from importlib.util import cache_from_source
 from pathlib import Path
 
 from exprun.store import write_json_atomic
 from exprun.task import Context, check_metrics
 
 RESULT = "result.json"
+
+
+def _fresh_bytecode(source_file: str) -> None:
+    """Make sure the task module runs the source whose hash was recorded.
+
+    Python reuses `__pycache__` bytecode when the source's modification time (in whole seconds) and
+    size match what the cache file records. An edit that keeps the size, within the same second as
+    the last compile, would run stale code while the manifest records the new source's hash.
+    Compiling the cache in "checked hash" mode (PEP 552) makes Python validate it against a hash of
+    the source instead. Other modules the task imports keep the usual timestamp check (a documented
+    limitation); if the cache can't be written, Python falls back to compiling from source.
+    """
+    # An unwritable folder, or a syntax error the import itself will report properly.
+    with suppress(OSError, py_compile.PyCompileError):
+        py_compile.compile(source_file, cfile=cache_from_source(source_file), doraise=True,
+                           invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
 
 
 def _traceback(exc: BaseException) -> str:
@@ -40,6 +59,7 @@ def main(run_folder: Path) -> int:
     result_path = run_folder / RESULT
     module, function = manifest["spec"]["task"].split(":")
     sys.path.insert(0, manifest["config"]["folder"])
+    _fresh_bytecode(manifest["code"]["file"])
     try:
         task = getattr(importlib.import_module(module), function)
         ctx = Context(run_id=manifest["id"], seed=manifest["spec"]["seed"], params=manifest["spec"]["params"],

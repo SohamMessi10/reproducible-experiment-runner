@@ -100,3 +100,20 @@ def project(tmp_path):
         return path
 
     return SimpleNamespace(root=tmp_path, write=write)
+
+
+CARELESS = '''
+import random
+
+
+def careless(ctx):
+    return {"score": 0.5 + random.random() / 2}        # in [0.5, 1): any two differ by under 50%
+'''
+
+
+@pytest.fixture
+def careless_project(project):
+    """The project, plus a task that ignores its seed."""
+    (project.root / "careless.py").write_text(CARELESS)
+    (project.root / "careless.toml").write_text('[experiment]\nname = "careless"\ntask = "careless:careless"\nseed = 1\n')
+    return project

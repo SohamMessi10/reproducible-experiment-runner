@@ -112,6 +112,9 @@ def show_lines(manifest: dict, status: str, folder: str) -> list[str]:
                                                         if m["config"].get("overrides") else ""))
     lines.append(f"task        {m['spec']['task']}  ({_code_line(m['code'])})")
     lines.append(f"seed        {m['spec']['seed']}" + ("  (drawn)" if m.get("seed_source") == "drawn" else ""))
+    if m.get("rerun_of"):
+        outcome = (m.get("reproduction") or {}).get("outcome", "not judged")
+        lines.append(f"rerun of    {m['rerun_of']}: {outcome}")
     lines.append(f"fingerprint {short(m['fingerprint'], 16)}   config hash {short(m['config_hash'], 16)}")
     params = flatten(m["spec"]["params"])
     lines.append("params" + ("      none" if not params else ""))
@@ -247,16 +250,11 @@ def verdict(result: dict, count: int) -> str:
     return f"different fingerprints: {joined} {'differs' if len(words) == 1 else 'differ'}"
 
 
-def compare_lines(manifests: list[dict], statuses: list[str], show_all: bool = False) -> list[str]:
-    labels = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(len(manifests))]
-    result = compare(manifests, show_all)
-    lines = ["runs"]
-    lines += table([[label, m["id"], m["experiment"]["name"], status]
-                    for label, m, status in zip(labels, manifests, statuses, strict=True)], indent="  ")
-    lines.append("")
-    lines.append(verdict(result, len(manifests)))
+def section_lines(result: dict, labels: list[str]) -> list[str]:
+    """The differing values of a comparison, section by section (metrics aside)."""
     titles = {"params": "params", "seed": "seed", "task": "task", "inputs": "inputs (content)", "code": "code",
               "environment": "environment"}
+    lines = []
     for name, section in result["sections"].items():
         rows = section["rows"]
         if not rows:
@@ -267,6 +265,18 @@ def compare_lines(manifests: list[dict], statuses: list[str], show_all: bool = F
         # Params keep JSON quoting (so "1" and 1 differ visibly); hashes, versions and names print plainly.
         shown = show_value if name in ("params", "seed", "task") else show_plain
         lines += table([[row["key"], *map(shown, row["values"])] for row in rows], header=["", *labels], indent="  ")
+    return lines
+
+
+def compare_lines(manifests: list[dict], statuses: list[str], show_all: bool = False) -> list[str]:
+    labels = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(len(manifests))]
+    result = compare(manifests, show_all)
+    lines = ["runs"]
+    lines += table([[label, m["id"], m["experiment"]["name"], status]
+                    for label, m, status in zip(labels, manifests, statuses, strict=True)], indent="  ")
+    lines.append("")
+    lines.append(verdict(result, len(manifests)))
+    lines += section_lines(result, labels)
     if result["metrics"]:
         lines.append("")
         lines.append("metrics" + ("  (change from A in brackets)" if len(manifests) > 1 else ""))

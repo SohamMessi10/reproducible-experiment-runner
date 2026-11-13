@@ -105,22 +105,29 @@ def child_environment() -> dict[str, str]:
 
 
 def execute(config: Config, runs: RunStore, *, overrides: list[str] | None = None, timeout: float | None = None,
-            quiet: bool = False, on_start=None) -> tuple[RunFolder, dict]:
+            quiet: bool = False, on_start=None, rerun_of: dict | None = None) -> tuple[RunFolder, dict]:
     """Run the experiment. Returns its folder and final manifest. `on_start(folder, manifest)` is
-    called once the run exists, before the task starts (the CLI uses it to print the run id)."""
-    seed, seed_source = (config.seed, "config") if config.seed is not None else (secrets.randbelow(SEED_LIMIT), "drawn")
+    called once the run exists, before the task starts (the CLI uses it to print the run id).
+    `rerun_of` is the manifest of a run being re-run: its seed is reused, drawn or not."""
+    if rerun_of is not None:
+        seed, seed_source = rerun_of["spec"]["seed"], rerun_of["seed_source"]
+    elif config.seed is not None:
+        seed, seed_source = config.seed, "config"
+    else:
+        seed, seed_source = secrets.randbelow(SEED_LIMIT), "drawn"
     identity = identify(config, seed)
     env = child_environment()
     started = now()
     folder, lock = runs.create(identity.fingerprint, started)
     try:
         return folder, _run(config, folder, lock, identity, seed_source, env, started, overrides or [], timeout,
-                            quiet, on_start)
+                            quiet, on_start, rerun_of["id"] if rerun_of is not None else None)
     finally:
         lock.release()
 
 
-def _run(config, folder, lock, identity, seed_source, env, started, overrides, timeout, quiet, on_start) -> dict:
+def _run(config, folder, lock, identity, seed_source, env, started, overrides, timeout, quiet, on_start,
+         rerun_of) -> dict:
     (folder.path / "config.toml").write_bytes(config.source)
     folder.outputs.mkdir()
     inputs = {name: {**record, "resolved": str(config.inputs[name])} for name, record in identity.inputs.items()}
@@ -133,6 +140,7 @@ def _run(config, folder, lock, identity, seed_source, env, started, overrides, t
                    "overrides": overrides},
         "spec": identity.spec,
         "seed_source": seed_source,
+        "rerun_of": rerun_of,
         "config_hash": identity.config_hash,
         "inputs": inputs,
         "code": identity.code,

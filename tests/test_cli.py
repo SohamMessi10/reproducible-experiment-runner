@@ -325,3 +325,91 @@ def test_compare_as_json_has_no_placeholders(project, capsys):
     assert data["differing_parts"] == ["config"]
     params = {row["key"]: row for row in data["sections"]["params"]["rows"]}
     assert params["C"]["values"] == [1.0, 2.0] and params["C"]["same"] is False and params["sleep"]["same"] is True
+
+
+# --- rerun --------------------------------------------------------------------------------------
+
+def test_rerun_of_a_deterministic_run_reproduces_identically(project, capsys):
+    original = make_run(project)
+    capsys.readouterr()
+    assert main(["rerun", original, *runs_args(project), "--quiet"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "reproduced: identical (3 metrics equal, 2 output files byte-identical)\n"
+    assert captured.err.startswith(f"rerun of {original} (seed 42) as run ")
+    rerun = RunStore(project.root / "runs").all()[-1].read()
+    assert rerun["rerun_of"] == original and rerun["reproduction"]["outcome"] == "identical"
+    assert rerun["reproduction"]["of"] == original and rerun["reproduction"]["code_changes"] == []
+    assert main(["show", "latest", *runs_args(project)]) == 0
+    assert f"rerun of    {original}: identical" in capsys.readouterr().out
+
+
+def test_a_rerun_records_the_original_overrides(project, capsys):
+    original = make_run(project, "--set", "C=2.5")
+    assert main(["rerun", original, *runs_args(project), "--quiet"]) == 0
+    rerun = RunStore(project.root / "runs").all()[-1].read()
+    assert rerun["config"]["overrides"] == ["C=2.5"] and rerun["spec"]["params"]["C"] == 2.5
+
+
+def test_rerun_of_a_task_that_ignores_its_seed_is_not_reproduced(careless_project, capsys):
+    project = careless_project
+    main(["run", str(project.root / "careless.toml"), "--runs", str(project.root / "runs"), "--quiet"])
+    original = RunStore(project.root / "runs").all()[-1].id
+    capsys.readouterr()
+    assert main(["rerun", original, *runs_args(project), "--quiet"]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("NOT reproduced: different\n  score: ")
+    assert "config, data, code and environment are the same as recorded: the task itself isn't deterministic" in out
+    assert main(["rerun", original, *runs_args(project), "--quiet", "--tolerance", "0.6"]) == 0
+    assert capsys.readouterr().out.startswith("reproduced: within tolerance (largest relative difference ")
+
+
+def test_rerun_shows_what_else_differs(project, capsys, monkeypatch):
+    original = make_run(project)
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    (project.root / "tasks.py").write_text((project.root / "tasks.py").read_text().replace(
+        '"accuracy": 0.9', '"accuracy": 0.8'))
+    capsys.readouterr()
+    assert main(["rerun", original, *runs_args(project), "--quiet", "--allow-code-change"]) == 3
+    captured = capsys.readouterr()
+    assert "note: tasks.py changed (source " in captured.err
+    out = captured.out
+    assert "NOT reproduced: different\n  accuracy: 0.9 -> 0.8  (relative difference 0.111)" in out
+    assert "what else differs:" in out and "source" in out and "$OMP_NUM_THREADS  –         3" in out
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1", "nan"])
+def test_rerun_refuses_a_bad_tolerance(project, capsys, value):
+    assert main(["rerun", "latest", *runs_args(project), "--tolerance", value]) == 2
+    assert "--tolerance must be a relative difference" in capsys.readouterr().err
+
+
+def test_rerun_refuses_what_it_cannot_reproduce(project, capsys):
+    failed = make_run(project, task="boom", config="boom.toml")
+    capsys.readouterr()
+    assert main(["rerun", failed, *runs_args(project)]) == 2
+    assert f"can't rerun {failed}: run {failed} failed; only a run that succeeded" in capsys.readouterr().err
+    good = make_run(project)
+    (project.root / "data.csv").write_text("changed\n")
+    capsys.readouterr()
+    assert main(["rerun", good, *runs_args(project)]) == 2
+    assert "input data (data.csv) has changed since the run" in capsys.readouterr().err
+    assert main(["rerun", "2099", *runs_args(project)]) == 2
+    assert main(["rerun", good, *runs_args(project), "--timeout", "0"]) == 2
+
+
+def test_a_rerun_that_fails_is_not_reproduced(project, capsys):
+    original = make_run(project)
+    (project.root / "tasks.py").write_text((project.root / "tasks.py").read_text().replace(
+        "def train(ctx):", "def train(ctx):\n    raise RuntimeError('broken now')"))
+    capsys.readouterr()
+    assert main(["rerun", original, *runs_args(project), "--quiet", "--allow-code-change"]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("NOT reproduced: failed\n  the rerun failed: RuntimeError: broken now")
+
+
+# --- demo ---------------------------------------------------------------------------------------
+
+def test_demo_needs_scikit_learn(tmp_path, capsys, monkeypatch):
+    monkeypatch.setitem(sys.modules, "sklearn.datasets", None)       # as if it weren't installed
+    assert main(["demo", str(tmp_path / "demo")]) == 2
+    assert 'the demo needs scikit-learn and NumPy (sklearn.datasets is missing): pip install' in capsys.readouterr().err

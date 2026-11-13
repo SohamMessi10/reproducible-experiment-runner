@@ -26,7 +26,18 @@ def test_invalid_metrics_are_refused_with_a_reason(value, message):
         check_metrics(value)
 
 
-def test_numpy_values_get_a_hint():
+def test_numpy_scalars_become_plain_python_values():
     numpy = pytest.importorskip("numpy")
-    with pytest.raises(MetricsError, match=r"convert NumPy values with float\(\) or int\(\)"):
-        check_metrics({"accuracy": numpy.float64(0.9)})
+    metrics = check_metrics({"f64": numpy.float64(0.9), "f32": numpy.float32(0.1), "i64": numpy.int64(7),
+                             "flag": numpy.bool_(True), "s": numpy.str_("x")})
+    assert metrics == {"f64": 0.9, "f32": float(numpy.float32(0.1)), "i64": 7, "flag": True, "s": "x"}
+    assert [type(v) for v in metrics.values()] == [float, float, int, bool, str]
+    assert metrics["f32"] == 0.10000000149011612          # the float32 value exactly, not rounded to 0.1
+
+
+def test_numpy_arrays_and_nan_are_refused():
+    numpy = pytest.importorskip("numpy")
+    with pytest.raises(MetricsError, match="a NumPy array: return one number"):
+        check_metrics({"scores": numpy.array([0.9, 0.8])})
+    with pytest.raises(MetricsError, match="metric 'loss' is nan"):
+        check_metrics({"loss": numpy.float32("nan")})

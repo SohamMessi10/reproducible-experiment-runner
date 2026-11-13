@@ -55,11 +55,14 @@ rather than assumed.
     Then it shows only the values that differ (params by dotted path, seed, input hashes, code
     version, Python, platform, packages, recorded variables), and every metric with its change from
     the first run.
-- `exprun rerun RUN` re-executes from the manifest, refuses if the inputs' content has changed, and
-  reports what reproduced:
-  - metrics: exactly, or only within a tolerance;
-  - outputs: byte for byte or not;
-  - which environment differences might explain any change.
+- `exprun rerun RUN` re-executes from the manifest: the config bytes saved with the run, its
+  overrides and its seed (even a drawn one).
+  - **It refuses, before running:** a run that didn't succeed; an input whose content changed; a
+    task whose code changed (source, commit or uncommitted edits), unless `--allow-code-change`.
+  - **It reports** identical / metrics identical but outputs differ / within `--tolerance`
+    (metrics only) / different / failed, with the metric changes, the differing output files and
+    the environment differences.
+  - **Exit codes:** 0 if reproduced, 3 if not.
 - A demo task (scikit-learn on a dataset that ships with it), so everything runs offline.
 
 **Stretch:** parameter sweeps with a bounded number of parallel workers; an HTML comparison report.
@@ -176,7 +179,14 @@ runs/<run-id>/
 
   Each outcome comes with the environment differences between the two runs.
 - **What is not promised:** bit-for-bit results across machines, library versions or thread
-  counts. Those are recorded so a difference can be explained.
+  counts. Those are recorded so a difference can be explained. Measured on the demo in
+  [`reproducibility.md`](reproducibility.md): a parallel random forest differs in the last bits on
+  every rerun, and an older scikit-learn changes logistic regression's probabilities, while every
+  metric stays the same.
+- **The code that runs is the code that was hashed.** Python reuses cached bytecode when a source
+  file's modification time (in seconds) and size are unchanged, so a quick same-size edit could run
+  stale code. The task's module is compiled with a hash-checked cache (PEP 552) before import.
+  Other modules it imports keep the usual timestamp check, a remaining limitation.
 
 ## Errors and exit codes
 

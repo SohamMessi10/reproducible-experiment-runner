@@ -86,6 +86,13 @@ def load(path: Path | str, overrides: list[str] | None = None) -> Config:
         source = path.read_bytes()
     except OSError as exc:
         raise OSError(f"{path} can't be read ({exc.strerror})") from None
+    return loads(source, path, overrides)
+
+
+def loads(source: bytes, path: Path | str, overrides: list[str] | None = None) -> Config:
+    """Validate a config from its bytes, as if it were at `path` (inputs resolve against its folder).
+    A rerun uses this with the bytes saved in the run, so later edits to the file don't matter."""
+    path = Path(path).absolute()
     try:
         text = source.decode("utf-8-sig")   # tolerate a byte-order mark, which tomllib refuses
     except UnicodeDecodeError:
