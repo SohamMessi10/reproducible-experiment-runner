@@ -71,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
     show.add_argument("--json", action="store_true", help="print the manifest")
 
+    compare = commands.add_parser("compare", help="show what differs between runs")
+    compare.add_argument("runs_to_compare", nargs="+", metavar="RUN", help="two or more runs (ids, unique starts, 'latest')")
+    compare.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    compare.add_argument("--all", action="store_true", help="also show values that are the same")
+    compare.add_argument("--json", action="store_true", help="print the comparison as JSON")
+
     rerun = commands.add_parser("rerun", help="run a past run again from its manifest and check it reproduces")
     rerun.add_argument("run", help="a run id, a unique start of one, or 'latest'")
     rerun.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
@@ -84,12 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo = commands.add_parser("demo", help="write a ready-to-run demo (handwritten digits, scikit-learn)")
     demo.add_argument("folder", type=Path, help="where to write it (created if needed; nothing is overwritten)")
-
-    compare = commands.add_parser("compare", help="show what differs between runs")
-    compare.add_argument("runs_to_compare", nargs="+", metavar="RUN", help="two or more runs (ids, unique starts, 'latest')")
-    compare.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
-    compare.add_argument("--all", action="store_true", help="also show values that are the same")
-    compare.add_argument("--json", action="store_true", help="print the comparison as JSON")
     return parser
 
 
