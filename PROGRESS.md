@@ -2,11 +2,73 @@
 
 ## Status
 
-**Milestone 4 of 6 complete: reproduction.** Next: milestone 5, parameter sweeps with bounded
-parallel workers. The plan is in
+**Milestone 5 of 6 complete: sweeps.** Next: milestone 6, the README with results, and a final
+audit. The plan is in
 [`docs/design.md`](docs/design.md).
 
 ## Milestones
+
+### Milestone 5: sweeps
+
+- **`exprun sweep CONFIG --grid KEY=V1,V2,... [--grid ...] [--set ...] [--workers N]`** runs one
+  ordinary run per combination of values, at most N at a time, and ends with a table: each run's
+  swept values, status, duration and every metric, optionally `--sort`ed by a metric. It exits 0
+  if every run succeeded and 1 otherwise.
+  - **Grid values are TOML,** as with `--set`: `C=0.1,1,10`, `name="a","b"`, `layers=[64],[128]`.
+    `1`, `1.0`, `true` and `"1"` are different values.
+  - **Checked before anything runs:** every point's config, the task, and the inputs. A typo in a
+    grid key fails at once, naming the point, with the usual suggestion.
+  - **Seeds:** `seed` can be swept. Otherwise every point shares the config's seed, or one drawn for
+    the whole sweep, so points differ only in what was swept.
+  - **Each manifest records** the sweep id, the grid, and its index and values, and each point's
+    values as overrides, so `exprun rerun` reproduces a run from a sweep like any other.
+- **`exprun sweep-results [SWEEP] [--sort METRIC] [--descending] [--json]`** shows a past sweep:
+  by id, a unique start of one, or `latest`.
+- **Parallel runs and stopping.** Worker threads each run a child process and wait for it. Only
+  the main thread gets signals, so it passes a stop request to the runs in progress: the first
+  stops them in stages, as Ctrl-C does a single run, and a second kills them. Points not yet
+  started are reported as "not started". With more than one worker, task output goes only to the
+  log files, since it would interleave.
+- **Measured** (written up in `docs/reproducibility.md`): a 12-run demo sweep on 2 CPUs took 15.0
+  and 15.4 s with 1 worker, 9.5 and 9.8 s with 2, and 8.9 and 10.1 s with 3. All 12 output files
+  were byte-identical between 1 and 2 workers.
+- **Fixed while building:**
+  - **`exprun run` failed when started outside the config's folder with a relative runs folder**
+    (the default `./runs`). The task runs in its config's folder, where the relative path to its
+    run folder led nowhere, so every such run failed with "exited with code 1". The demo's own
+    instructions (`exprun run demo/logistic.toml`) hit it. My earlier checks always ran from inside
+    the folder, and the tests used absolute paths. The runs folder is now made absolute (the
+    `fix:` commit), with a test that runs from another folder.
+  - **The config's seed overrode an explicit one,** so the first sweep over seeds ran every point
+    with the config's seed. An explicit seed now wins. Before, the only explicit seed was a rerun's,
+    always equal to the config's, so nothing else changed.
+  - **TOML refuses a raw DEL character in strings,** which JSON allows; Hypothesis found it in the
+    function that writes grid values back as overrides. It now escapes for TOML.
+  - **On Python 3.12, a stopped sweep could lose a run still in progress** (the second `fix:`
+    commit). The sweep waited for its workers with `Thread.join`; before Python 3.13, a join
+    interrupted by Ctrl-C can leave `is_alive()` reporting False for a thread that is still running,
+    so the sweep ended early and called that point "not started". The real-signal test failed in 18
+    of 30 repetitions on 3.12 and never on 3.13. The workers now count themselves out and the main
+    thread polls that count; 0 failures in 30 repetitions on 3.12 since.
+  - **A task can record its own Ctrl-C** while its worker thread reaps it before seeing the stop
+    request. Such a run is now recorded as interrupted, not failed.
+
+**Tests (312):**
+- Grid parsing and every refusal; a Hypothesis round trip of arbitrary values through the
+  override text; planning, seeds and refusals before anything runs.
+- Real sweeps: grid order and recorded metadata; at most N tasks at once (measured from the tasks'
+  own start and end times); a failing point and a point that can't start, with the rest still
+  running.
+- **Real signals:** Ctrl-C to the process group and SIGTERM to the sweep alone, each stopping two
+  running tasks within 4 s and starting none of the other two; stop requests from another thread,
+  including a second one killing a task that ignores the first.
+- The CLI end to end, including a rerun of a run from a seed sweep.
+
+**Mutation-checked:** 30 deliberate bugs. 28 were caught at once and 2 survived:
+- **A test gap:** listing sweeps without removing repeats made a multi-run sweep match its own
+  prefix "twice". My test's sweeps had one run each; one now has two.
+- **Dead code:** a fallback for float text without a decimal point, which Python's `repr` never
+  produces. I removed it.
 
 ### Milestone 4: reproduction
 
@@ -261,6 +323,9 @@ exprun list --status succeeded
 exprun show latest
 exprun compare 20261112T0229 latest
 exprun demo demo && cd demo && exprun run logistic.toml && exprun rerun latest
+exprun run demo/logistic.toml   (from the demo's parent folder, since milestone 5's fix)
+exprun sweep demo/logistic.toml --grid logistic.C=0.01,0.1,1,10 --grid seed=1,2,3 --workers 2 --sort accuracy --descending
+exprun sweep-results --sort log_loss
 python scripts/nondeterminism.py --other-python /path/to/env-with-scikit-learn-1.8/bin/python
 ```
 
@@ -278,3 +343,6 @@ python scripts/nondeterminism.py --other-python /path/to/env-with-scikit-learn-1
   the result.
 - Floating-point addition isn't associative, so parallel reductions vary in the last bits; ULPs.
 - Python's hash randomization, and bytecode cache validation (timestamp versus hash, PEP 552).
+- Why worker threads are fine here (they only wait on processes) and why only the main thread
+  receives signals; passing a stop request instead.
+- Relative paths and the working directory of a child process.

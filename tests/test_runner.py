@@ -1,12 +1,16 @@
 import json
+import os
+import signal
 import subprocess
+import threading
+import time
 
 import pytest
 
 from exprun.codeversion import TaskError
 from exprun.config import SEED_LIMIT, load
 from exprun.hashing import digest
-from exprun.runner import execute
+from exprun.runner import StopRequest, execute
 from exprun.store import RunStore
 
 
@@ -23,7 +27,7 @@ def test_a_successful_run_records_everything(project):
     assert m["status"] == "succeeded" and m["exit_code"] == 0 and m["signal"] is None and m["error"] is None
     assert m["metrics"] == {"accuracy": 0.9, "rows": 4, "seed": 42}
     assert m["spec"] == {"task": "tasks:train", "seed": 42, "params": {"C": 1.0, "sleep": 30}}
-    assert m["seed_source"] == "config" and m["schema"] == 1 and m["id"] == folder.id
+    assert m["seed_source"] == "config" and m["schema"] == 1 and m["id"] == folder.id and m["sweep"] is None
     assert m["experiment"] == {"name": "demo", "description": ""}
     assert m["config"]["source_sha256"] == digest((project.root / "exp.toml").read_bytes())
     assert m["inputs"]["data"]["path"] == "data.csv" and m["inputs"]["data"]["resolved"] == str(project.root / "data.csv")
@@ -161,3 +165,61 @@ def test_an_edit_with_the_same_size_and_timestamp_still_runs_the_new_code(projec
     _, second = run(project)
     assert first["metrics"]["accuracy"] == 0.9 and second["metrics"]["accuracy"] == 0.8
     assert second["code"]["source_sha256"] != first["code"]["source_sha256"]
+
+
+def test_a_task_that_reports_its_own_ctrl_c_is_interrupted_even_if_the_runner_saw_none(project):
+    # In a sweep, Ctrl-C reaches the task directly, and its worker thread may reap it before it
+    # learns of the stop request from the main thread.
+    _, m = run(project, "ctrl_c")
+    assert m["status"] == "interrupted" and m["error"]["type"] == "KeyboardInterrupt" and m["exit_code"] == 130
+
+
+# --- stopping a run from another thread ----------------------------------------------------------
+
+def run_in_thread(project, task, stop):
+    config = load(project.write(task))
+    box = {}
+    thread = threading.Thread(target=lambda: box.update(result=execute(
+        config, RunStore(project.root / "runs"), quiet=True, stop=stop)))
+    mark = project.root / "started.mark"
+    os.environ["EXPRUN_TEST_MARK"] = str(mark)
+    try:
+        thread.start()
+        deadline = time.monotonic() + 20
+        while not mark.exists():
+            assert time.monotonic() < deadline, "the task never started"
+            time.sleep(0.02)
+    finally:
+        del os.environ["EXPRUN_TEST_MARK"]
+    return thread, box
+
+
+def test_a_stop_request_from_another_thread_stops_the_run(project):
+    stop = StopRequest()
+    thread, box = run_in_thread(project, "slow", stop)
+    began = time.monotonic()
+    stop.request(signal.SIGTERM)
+    thread.join(20)
+    _, m = box["result"]
+    assert m["status"] == "interrupted" and m["signal"] == "SIGTERM" and time.monotonic() - began < 3
+
+
+def test_a_second_stop_request_kills_a_task_that_ignores_the_first(project):
+    stop = StopRequest()
+    thread, box = run_in_thread(project, "stubborn", stop)
+    stop.request(signal.SIGTERM)
+    time.sleep(0.5)
+    assert thread.is_alive()                    # ignored: it would get the grace period
+    began = time.monotonic()
+    stop.request(None)
+    thread.join(20)
+    _, m = box["result"]
+    assert m["status"] == "interrupted" and m["signal"] == "SIGKILL" and time.monotonic() - began < 3
+
+
+def test_a_run_that_starts_after_a_stop_request_is_stopped_at_once(project):
+    stop = StopRequest()
+    stop.request(signal.SIGTERM)
+    began = time.monotonic()
+    _, m = execute(load(project.write("slow")), RunStore(project.root / "runs"), quiet=True, stop=stop)
+    assert m["status"] == "interrupted" and time.monotonic() - began < 5

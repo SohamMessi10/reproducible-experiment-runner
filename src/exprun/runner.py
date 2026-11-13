@@ -47,6 +47,28 @@ class Terminated(BaseException):
     """The runner received SIGTERM."""
 
 
+class StopRequest:
+    """Stops runs from another thread. Signals reach only the main thread, so a sweep running tasks
+    from worker threads passes one of these to each run: the first request stops the run in stages,
+    like Ctrl-C does a single run, and a second kills it at once."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.count = 0
+        self.first_signal: int | None = None
+
+    def request(self, first_signal: int | None) -> None:
+        """`first_signal` goes to the task at once: None for Ctrl-C, which the task got itself."""
+        with self._lock:
+            self.count += 1
+            if self.count == 1:
+                self.first_signal = first_signal
+
+    @property
+    def requested(self) -> bool:
+        return self.count > 0
+
+
 @contextmanager
 def _sigterm_raises():
     """Turn SIGTERM into an exception, so the runner can stop the task and record it. Only possible
@@ -105,12 +127,18 @@ def child_environment() -> dict[str, str]:
 
 
 def execute(config: Config, runs: RunStore, *, overrides: list[str] | None = None, timeout: float | None = None,
-            quiet: bool = False, on_start=None, rerun_of: dict | None = None) -> tuple[RunFolder, dict]:
+            quiet: bool = False, on_start=None, rerun_of: dict | None = None, seed: int | None = None,
+            seed_source: str = "sweep", sweep: dict | None = None,
+            stop: StopRequest | None = None) -> tuple[RunFolder, dict]:
     """Run the experiment. Returns its folder and final manifest. `on_start(folder, manifest)` is
     called once the run exists, before the task starts (the CLI uses it to print the run id).
-    `rerun_of` is the manifest of a run being re-run: its seed is reused, drawn or not."""
+    `rerun_of` is the manifest of a run being re-run: its seed is reused, drawn or not. `seed`
+    replaces the config's, recorded as coming from `seed_source`. `sweep` is recorded in the
+    manifest as is. `stop` lets another thread stop the run."""
     if rerun_of is not None:
         seed, seed_source = rerun_of["spec"]["seed"], rerun_of["seed_source"]
+    elif seed is not None:
+        pass
     elif config.seed is not None:
         seed, seed_source = config.seed, "config"
     else:
@@ -121,13 +149,13 @@ def execute(config: Config, runs: RunStore, *, overrides: list[str] | None = Non
     folder, lock = runs.create(identity.fingerprint, started)
     try:
         return folder, _run(config, folder, lock, identity, seed_source, env, started, overrides or [], timeout,
-                            quiet, on_start, rerun_of["id"] if rerun_of is not None else None)
+                            quiet, on_start, rerun_of["id"] if rerun_of is not None else None, sweep, stop)
     finally:
         lock.release()
 
 
 def _run(config, folder, lock, identity, seed_source, env, started, overrides, timeout, quiet, on_start,
-         rerun_of) -> dict:
+         rerun_of, sweep, stop) -> dict:
     (folder.path / "config.toml").write_bytes(config.source)
     folder.outputs.mkdir()
     inputs = {name: {**record, "resolved": str(config.inputs[name])} for name, record in identity.inputs.items()}
@@ -141,6 +169,7 @@ def _run(config, folder, lock, identity, seed_source, env, started, overrides, t
         "spec": identity.spec,
         "seed_source": seed_source,
         "rerun_of": rerun_of,
+        "sweep": sweep,
         "config_hash": identity.config_hash,
         "inputs": inputs,
         "code": identity.code,
@@ -179,7 +208,7 @@ def _run(config, folder, lock, identity, seed_source, env, started, overrides, t
                                                             None if quiet else sys.stderr.buffer), daemon=True)]
             for thread in copiers:
                 thread.start()
-            returncode, rusage, stopped_by = _wait(process.pid, began, timeout)
+            returncode, rusage, stopped_by = _wait(process.pid, began, timeout, stop)
             process.returncode = returncode      # reaped by wait4: tell Popen, so it doesn't think it still runs
             for thread in copiers:
                 thread.join()
@@ -190,7 +219,10 @@ def _run(config, folder, lock, identity, seed_source, env, started, overrides, t
     result = _read_result(folder)
     manifest["metrics"] = result.get("metrics")
     manifest["error"] = result.get("error")
-    if stopped_by == "interrupt":
+    # The task can get Ctrl-C directly (it shares the terminal) while this runner wasn't the process
+    # interrupted: in a sweep, only the main thread sees KeyboardInterrupt. Its own report says so.
+    interrupted_itself = (result.get("error") or {}).get("type") == "KeyboardInterrupt"
+    if stopped_by == "interrupt" or interrupted_itself:
         manifest["status"] = "interrupted"
         manifest["error"] = manifest["error"] or {"type": "Interrupted", "message": "the run was stopped (Ctrl-C or SIGTERM)"}
     elif stopped_by == "timeout":
@@ -215,10 +247,11 @@ def _spawn(folder, config, env, lock, stdout_w, stderr_w) -> subprocess.Popen:
                                stdin=subprocess.DEVNULL, stdout=stdout_w, stderr=stderr_w, pass_fds=(lock.fd,))
 
 
-def _wait(pid: int, began: float, timeout: float | None):
+def _wait(pid: int, began: float, timeout: float | None, request: StopRequest | None = None):
     """Wait for the child, reaping it with wait4 to get its own resource usage. Returns
     (exit code, usage, None | "interrupt" | "timeout")."""
     stopped_by = None
+    requests_seen = 0
     stages: list[tuple[float, int | None]] = []       # (deadline, signal to send then)
 
     def stop(reason: str, first_signal: int | None) -> None:
@@ -237,6 +270,12 @@ def _wait(pid: int, began: float, timeout: float | None):
                 return os.waitstatus_to_exitcode(status), rusage, stopped_by
             if timeout is not None and stopped_by is None and clock.monotonic() - began > timeout:
                 stop("timeout", signal.SIGTERM)
+            if request is not None and request.count > requests_seen:
+                if requests_seen == 0 and stopped_by is None:
+                    stop("interrupt", request.first_signal)
+                if request.count > 1:         # asked again: stop() kills a run it is already stopping
+                    stop("interrupt", None)
+                requests_seen = request.count
             while stages and clock.monotonic() >= stages[0][0]:
                 _, sig = stages.pop(0)
                 if sig is not None:

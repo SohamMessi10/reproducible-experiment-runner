@@ -63,7 +63,7 @@ def test_only_the_experiment_table_is_required(project):
 def test_the_spec_is_task_seed_and_params(project):
     config = load(write(project, BASE))
     assert config.spec() == {"task": "tasks:train", "seed": 7, "params": config.params}
-    assert config.spec(seed=99)["seed"] == 7                    # the config's seed wins
+    assert config.spec(seed=99)["seed"] == 99                   # an explicit seed (a sweep's) wins
 
 
 def test_a_missing_seed_must_be_supplied_for_the_spec(project):

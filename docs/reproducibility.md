@@ -49,6 +49,26 @@ numbers (450 test images × 10 classes) makes its output file differ. Difference
   regression on a problem this small. That isn't a promise about other machines or larger
   problems. The thread settings are recorded so a difference can be traced.
 
+## Sweeps in parallel
+
+Running several tasks at once is a different kind of parallelism from the forest's threads: each
+run is its own process with its own seed, and nothing is added up across processes. A 12-run
+sweep of the demo (`--grid logistic.C=0.01,0.1,1,10 --grid seed=1,2,3`) on the same 2-CPU machine,
+each setting measured twice:
+
+| Workers | Wall time | Each run's duration (mean) |
+|---|---|---|
+| 1 | 15.0 s and 15.4 s | 1.09 s |
+| 2 | 9.5 s and 9.8 s | 1.09 s |
+| 3 | 8.9 s and 10.1 s | 1.58 s |
+
+- **Two workers took about 1.6 times less wall time,** not 2: each run also starts a Python
+  process and imports scikit-learn, and the sweep waits for its slowest run.
+- **A third worker gained nothing on 2 CPUs.** Each run just took longer, as three processes
+  shared two cores.
+- **Every output file was byte-identical** between the 1-worker and 2-worker sweeps, at all 12
+  points: running runs side by side didn't change any of them.
+
 ## Reproducing these numbers
 
 ```bash

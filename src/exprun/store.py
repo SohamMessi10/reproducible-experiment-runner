@@ -178,7 +178,9 @@ class RunLock:
 
 class RunStore:
     def __init__(self, root: Path | str):
-        self.root = Path(root)
+        # Absolute, because the task runs in its config's folder: a relative path to its run folder
+        # would point somewhere else from there.
+        self.root = Path(root).absolute()
 
     def create(self, fingerprint: str, at: datetime) -> tuple[RunFolder, RunLock]:
         """Claim a new run id and folder, and lock it."""

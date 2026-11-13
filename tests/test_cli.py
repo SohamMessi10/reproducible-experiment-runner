@@ -158,6 +158,17 @@ def test_run_with_an_override_records_it(project, capsys):
     assert m["spec"]["params"]["C"] == 2.5 and m["config"]["overrides"] == ["C=2.5"]
 
 
+def test_run_works_with_relative_paths_from_another_folder(project, capsys, monkeypatch):
+    # The task runs in its config's folder: the run folder and inputs must still be found from there.
+    project.write()
+    (project.root / "work").mkdir()
+    monkeypatch.chdir(project.root / "work")
+    assert main(["run", "../exp.toml", "--quiet"]) == 0
+    (folder,) = RunStore(project.root / "work" / "runs").all()
+    assert folder.read()["metrics"]["rows"] == 4 and (folder.outputs / "model.txt").exists()
+    assert main(["show", "latest"]) == 0
+
+
 def test_a_failed_run_exits_1_with_the_error(project, capsys):
     assert main(["run", str(project.write("boom")), "--runs", str(project.root / "runs"), "--quiet"]) == 1
     err = capsys.readouterr().err
@@ -413,3 +424,118 @@ def test_demo_needs_scikit_learn(tmp_path, capsys, monkeypatch):
     monkeypatch.setitem(sys.modules, "sklearn.datasets", None)       # as if it weren't installed
     assert main(["demo", str(tmp_path / "demo")]) == 2
     assert 'the demo needs scikit-learn and NumPy (sklearn.datasets is missing): pip install' in capsys.readouterr().err
+
+
+# --- sweep --------------------------------------------------------------------------------------
+
+def sweep(project, *extra, task="picky"):
+    return main(["sweep", str(project.write(task)), "--runs", str(project.root / "runs"), *extra])
+
+
+def test_sweep_runs_every_combination_and_prints_a_table(project, capsys):
+    assert sweep(project, "--grid", "C=1.0,2.0", "--grid", "seed=3,4", "--workers", "2") == 0
+    captured = capsys.readouterr()
+    err = captured.err.splitlines()
+    assert not any(line.startswith("[") for line in err)        # runs in parallel aren't announced one by one
+    assert err[0].startswith("sweep 20") and err[0].endswith(": 4 runs (2 x 2), 2 at a time, swept")
+    assert sum("done) C=" in line and "succeeded in" in line for line in err) == 4
+    assert err[-1].endswith(": all 4 runs succeeded")
+    lines = captured.out.splitlines()
+    assert lines[1].split() == ["RUN", "C", "seed", "STATUS", "DURATION", "C", "seed"]
+    assert [line.split()[1:4] for line in lines[2:]] == [["1.0", "3", "succeeded"], ["1.0", "4", "succeeded"],
+                                                        ["2.0", "3", "succeeded"], ["2.0", "4", "succeeded"]]
+
+
+def test_sweep_with_one_worker_names_each_run_as_it_starts_and_echoes_its_output(project, capsys):
+    assert sweep(project, "--grid", "C=1.0,2.0", task="train") == 0
+    captured = capsys.readouterr()
+    assert "[1/2] run 20" in captured.err and "[2/2] run 20" in captured.err
+    assert "training on 4 rows, C=1.0" in captured.out and "training on 4 rows, C=2.0" in captured.out
+
+
+def test_parallel_runs_dont_echo_their_output(project, capsys):
+    assert sweep(project, "--grid", "C=1.0,2.0", "--workers", "2", task="train") == 0
+    captured = capsys.readouterr()
+    assert "training on" not in captured.out and "a note on stderr" not in captured.err
+
+
+def test_sweep_sorts_by_a_metric(project, capsys):
+    assert sweep(project, "--grid", "C=2.0,1.0,3.0", "--sort", "C", "--descending") == 2     # C is swept
+    assert "--sort takes a metric; C is a swept param" in capsys.readouterr().err
+    assert sweep(project, "--grid", "seed=2,1,3", "--sort", "seed", "--descending") == 2
+    capsys.readouterr()
+    assert sweep(project, "--grid", "C=2.0,1.0,3.0", "--set", "sleep=0", "--sort", "seed") == 0
+    rows = capsys.readouterr().out.splitlines()[2:]
+    assert [row.split()[1] for row in rows] == ["2.0", "1.0", "3.0"]            # all equal: grid order kept
+
+
+def test_sweep_exits_1_if_any_run_fails(project, capsys):
+    assert sweep(project, "--grid", "C=1.0,-1.0") == 1
+    captured = capsys.readouterr()
+    assert "ValueError: C must not be negative" in captured.err
+    assert "1 run did not succeed" in captured.err and "failed" in captured.out
+
+
+@pytest.mark.parametrize("extra, message", [
+    (["--grid", "C=1.0", "--workers", "0"], "--workers must be 1 or more"),
+    (["--grid", "C=1.0", "--timeout", "0"], "--timeout must be a positive number"),
+    (["--grid", "C"], "must look like key.path=value"),
+    (["--grid", "D=1,2"], "--grid D: params has no D"),
+    (["--grid", "C=1.0", "--set", "C=2.0"], "C is given with both --set and --grid"),
+])
+def test_sweep_refuses_bad_usage_before_running_anything(project, capsys, extra, message):
+    assert sweep(project, *extra) == 2
+    assert message in capsys.readouterr().err
+    assert not (project.root / "runs").exists()
+
+
+def test_sweep_needs_a_grid(project, capsys):
+    with pytest.raises(SystemExit):
+        sweep(project)
+    assert "--grid" in capsys.readouterr().err
+
+
+def test_sweep_exits_2_if_no_point_could_start(project, capsys):
+    (project.root / "tasks.py").write_text("x = 1\n")       # the task is gone: refused at planning
+    assert sweep(project, "--grid", "C=1.0,2.0") == 2
+    assert "doesn't define a top-level function 'picky'" in capsys.readouterr().err
+
+
+def test_sweep_checks_its_inputs_before_running_anything(project, capsys):
+    (project.root / "data.csv").unlink()
+    assert sweep(project, "--grid", "C=1.0,2.0") == 2
+    assert "data.csv" in capsys.readouterr().err and not (project.root / "runs").exists()
+
+
+def test_a_run_from_a_seed_sweep_reruns_with_its_own_seed(project, capsys):
+    assert sweep(project, "--grid", "seed=11,12") == 0
+    capsys.readouterr()
+    assert main(["rerun", "latest", "--runs", str(project.root / "runs"), "--quiet"]) == 0
+    assert "reproduced: identical" in capsys.readouterr().out
+    rerun = RunStore(project.root / "runs").all()[-1].read()
+    assert rerun["spec"]["seed"] == 12 and rerun["metrics"]["seed"] == 12 and rerun["sweep"] is None
+
+
+def test_sweep_results_shows_a_past_sweep(project, capsys):
+    runs = str(project.root / "runs")
+    assert main(["sweep-results", "--runs", runs]) == 2
+    assert "no sweeps in" in capsys.readouterr().err
+    assert sweep(project, "--grid", "C=1.0,3.0,2.0") == 0
+    capsys.readouterr()
+    assert main(["sweep-results", "--runs", runs, "--sort", "C", "--descending"]) == 2
+    assert main(["sweep-results", "--runs", runs, "--sort", "seed"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("sweep 20") and out[0].endswith(": 3 of 3 runs recorded")
+    assert [line.split()[1] for line in out[2:]] == ["1.0", "3.0", "2.0"]
+    assert main(["sweep-results", "nope", "--runs", runs]) == 2
+    assert "no sweep 'nope'" in capsys.readouterr().err
+
+
+def test_sweep_results_as_json(project, capsys):
+    assert sweep(project, "--grid", "C=1.0,2.0") == 0
+    capsys.readouterr()
+    assert main(["sweep-results", "latest", "--runs", str(project.root / "runs"), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["grid"] == {"C": [1.0, 2.0]} and data["size"] == 2
+    assert [(r["point"], r["status"], r["metrics"]) for r in data["runs"]] == [
+        ({"C": 1.0}, "succeeded", {"C": 1.0, "seed": 42}), ({"C": 2.0}, "succeeded", {"C": 2.0, "seed": 42})]

@@ -35,6 +35,29 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, metavar="SECONDS", help="stop the task after this long")
     run.add_argument("--quiet", action="store_true", help="don't echo the task's output (it is still logged)")
 
+    sweep = commands.add_parser("sweep", help="run an experiment once for each combination of param values")
+    sweep.add_argument("config", type=Path, help="an experiment config (TOML)")
+    sweep.add_argument("--grid", action="append", default=[], metavar="KEY=V1,V2,...", required=True,
+                       help="values to try for a param, such as model.C=0.1,1,10 (TOML values; quote strings), or "
+                            "seed=1,2,3; repeatable: every combination runs")
+    sweep.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
+                       help="override a param for every run; repeatable")
+    sweep.add_argument("--workers", type=int, default=1, metavar="N", help="run up to N at a time (default 1)")
+    sweep.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    sweep.add_argument("--timeout", type=float, metavar="SECONDS", help="stop each run after this long")
+    sweep.add_argument("--sort", metavar="METRIC", help="order the results by this metric (ascending)")
+    sweep.add_argument("--descending", action="store_true", help="with --sort: largest first")
+    sweep.add_argument("--quiet", action="store_true",
+                       help="don't echo the tasks' output (it is still logged; with --workers > 1 it never is)")
+
+    results = commands.add_parser("sweep-results", help="show the results of a sweep as a table")
+    results.add_argument("sweep", nargs="?", default="latest", help="a sweep id, a unique start of one, or 'latest' "
+                         "(the default)")
+    results.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
+    results.add_argument("--sort", metavar="METRIC", help="order the results by this metric (ascending)")
+    results.add_argument("--descending", action="store_true", help="with --sort: largest first")
+    results.add_argument("--json", action="store_true", help="print the results as JSON")
+
     listing = commands.add_parser("list", help="list runs, newest first")
     listing.add_argument("--runs", type=Path, default=Path("runs"), help="the runs folder (default: ./runs)")
     listing.add_argument("--experiment", metavar="NAME", help="only runs of this experiment")
@@ -176,6 +199,120 @@ def run_command(args) -> int:
     print(f"run folder: {folder.path}" + (f"  ({len(outputs)} output file{'s' if len(outputs) != 1 else ''})"
                                           if outputs else ""), file=sys.stderr)
     return EXIT_OK if status == "succeeded" else EXIT_FAILED
+
+
+def sweep_command(args) -> int:
+    from exprun import sweep as sweeps
+    from exprun.codeversion import TaskError
+    from exprun.config import ConfigError
+    from exprun.hashing import InputError
+    from exprun.report import sweep_table, table
+    from exprun.store import RunStore
+
+    if args.timeout is not None and not args.timeout > 0:
+        print("exprun: --timeout must be a positive number of seconds", file=sys.stderr)
+        return EXIT_USAGE
+    if args.workers < 1:
+        print("exprun: --workers must be 1 or more", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        grid = sweeps.parse_grid(args.grid)
+        points, seed_source = sweeps.plan(args.config, args.overrides, grid)
+    except (sweeps.SweepError, ConfigError, TaskError, InputError) as exc:
+        print(f"exprun: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except OSError as exc:
+        print(f"exprun: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    if args.sort is not None and args.sort in {key for key, _ in grid}:
+        print(f"exprun: --sort takes a metric; {args.sort} is a swept param", file=sys.stderr)
+        return EXIT_USAGE
+    workers = min(args.workers, len(points))
+    sweep = sweeps.Sweep(sweeps.new_sweep_id(), points, seed_source, grid)
+    seeds = {"sweep": "swept", "config": f"seed {points[0].seed} from the config",
+             "drawn": f"seed {points[0].seed}, drawn for every run"}[seed_source]
+    print(f"sweep {sweep.id}: {_count(len(points), 'run')} ({' x '.join(str(len(v)) for _, v in grid)}), "
+          f"{workers} at a time, {seeds}", file=sys.stderr, flush=True)
+    width = len(str(len(points)))
+    finished = 0
+
+    def started(point, folder, manifest) -> None:
+        if workers == 1:
+            print(f"[{point.index + 1:>{width}}/{len(points)}] run {folder.id}  {sweeps.describe(point.values)}",
+                  file=sys.stderr, flush=True)
+
+    def done(outcome) -> None:
+        nonlocal finished
+        finished += 1
+        point, manifest = outcome.point, outcome.manifest
+        if manifest is None:
+            summary = f"could not run: {outcome.error}"
+        else:
+            metrics = "  ".join(f"{k}={_metric(v)}" for k, v in list((manifest["metrics"] or {}).items())[:3])
+            error = manifest["error"]
+            summary = f"{manifest['id']}  {manifest['status']} in {manifest['duration_s']:.2f} s" + (
+                f"  {metrics}" if metrics else f"  {error['type']}: {error['message']}" if error else "")
+        print(f"({finished:>{width}}/{len(points)} done) {sweeps.describe(point.values)}  {summary}",
+              file=sys.stderr, flush=True)
+
+    try:
+        sweeps.run(sweep, RunStore(args.runs), workers=workers, timeout=args.timeout,
+                   quiet=args.quiet or workers > 1, on_start=started, on_done=done)
+    except OSError as exc:
+        print(f"exprun: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    by_index = {outcome.point.index: outcome for outcome in sweep.outcomes}
+    rows = []
+    for point in points:
+        outcome = by_index.get(point.index)
+        manifest = outcome.manifest if outcome else None
+        status = manifest["status"] if manifest else ("not started" if outcome is None else "could not run")
+        rows.append((manifest, status, point.values))
+    header, lines = sweep_table([key for key, _ in grid], rows, args.sort, args.descending)
+    print()
+    for line in table(lines, header=header):
+        print(line)
+    failures = [o for o in sweep.outcomes if o.manifest is None or o.manifest["status"] != "succeeded"]
+    unstarted = sweep.not_started
+    if failures or unstarted:
+        parts = [f"{_count(len(failures), 'run')} did not succeed"] if failures else []
+        if unstarted:
+            parts.append(f"{len(unstarted)} not started")
+        print(f"sweep {sweep.id}: " + ", ".join(parts) + (" (stopped)" if sweep.stopped else ""), file=sys.stderr)
+        return EXIT_FAILED
+    print(f"sweep {sweep.id}: all {_count(len(points), 'run')} succeeded", file=sys.stderr)
+    return EXIT_OK
+
+
+def sweep_results_command(args) -> int:
+    from exprun import sweep as sweeps
+    from exprun.report import sweep_table, table
+    from exprun.store import RunStore
+
+    store = RunStore(args.runs)
+    try:
+        sweep_id = sweeps.resolve(store, args.sweep)
+    except LookupError as exc:
+        print(f"exprun: {exc.args[0]}", file=sys.stderr)
+        return EXIT_USAGE
+    found = sweeps.members(store, sweep_id)
+    first = found[0][1]["sweep"]
+    keys = list(first["grid"])
+    if args.sort is not None and args.sort in keys:
+        print(f"exprun: --sort takes a metric; {args.sort} is a swept param", file=sys.stderr)
+        return EXIT_USAGE
+    rows = [(manifest, status, manifest["sweep"]["point"]) for _, manifest, status in found]
+    if args.json:
+        print(json.dumps({"sweep": sweep_id, "grid": first["grid"], "size": first["size"],
+                          "runs": [{"id": m["id"], "point": m["sweep"]["point"], "status": status,
+                                    "duration_s": m["duration_s"], "metrics": m["metrics"]}
+                                   for m, status, _ in rows]}, indent=1, ensure_ascii=False))
+        return EXIT_OK
+    header, lines = sweep_table(keys, rows, args.sort, args.descending)
+    print(f"sweep {sweep_id}: {len(found)} of {_count(first['size'], 'run')} recorded")
+    for line in table(lines, header=header):
+        print(line)
+    return EXIT_OK
 
 
 def list_command(args) -> int:
@@ -379,7 +516,8 @@ def demo_command(args) -> int:
     return EXIT_OK
 
 
-COMMANDS = {"check": check_command, "run": run_command, "list": list_command, "show": show_command,
+COMMANDS = {"check": check_command, "run": run_command, "sweep": sweep_command,
+            "sweep-results": sweep_results_command, "list": list_command, "show": show_command,
             "compare": compare_command, "rerun": rerun_command, "demo": demo_command}
 
 

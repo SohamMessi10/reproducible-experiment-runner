@@ -72,8 +72,9 @@ class Config:
         return self.task.split(":")[1]
 
     def spec(self, seed: int | None = None) -> dict:
-        """What determines the computation: task, seed and params. `seed` fills in a missing one."""
-        chosen = self.seed if self.seed is not None else seed
+        """What determines the computation: task, seed and params. `seed`, if given, is the run's
+        seed: one drawn because the config sets none, or one chosen by a sweep."""
+        chosen = seed if seed is not None else self.seed
         if chosen is None:
             raise ValueError("the config sets no seed: pass the one drawn for this run")
         return {"task": self.task, "seed": chosen, "params": self.params}

@@ -291,3 +291,34 @@ def compare_lines(manifests: list[dict], statuses: list[str], show_all: bool = F
             rows.append(cells)
         lines += table(rows, header=["", *labels], indent="  ")
     return lines
+
+
+# --- sweep --------------------------------------------------------------------------------------
+
+def sweep_table(keys: list[str], rows: list[tuple[dict | None, str, dict]], sort: str | None = None,
+                descending: bool = False) -> tuple[list[str], list[list[str]]]:
+    """The results of a sweep: one row per point, its swept values, status and every metric.
+
+    `rows` holds (manifest or None if the point never ran, status, the point's values). With
+    `sort`, rows are ordered by that metric; rows without a number for it come last, in grid order."""
+    metric_names: list[str] = []
+    for manifest, _, _ in rows:
+        for name in (manifest or {}).get("metrics") or {}:
+            if name not in metric_names:
+                metric_names.append(name)
+    if sort is not None:
+        def number(row):
+            value = ((row[0] or {}).get("metrics") or {}).get(sort)
+            return value if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+        ranked = [row for row in rows if number(row) is not None]
+        ranked.sort(key=number, reverse=descending)
+        rows = ranked + [row for row in rows if number(row) is None]
+    header = ["RUN", *keys, "STATUS", "DURATION", *metric_names]
+    lines = []
+    for manifest, status, values in rows:
+        metrics = (manifest or {}).get("metrics") or {}
+        lines.append([manifest["id"] if manifest else "–", *(show_value(values.get(k, ABSENT)) for k in keys), status,
+                      seconds(manifest.get("duration_s")) if manifest else "–",
+                      *(show_metric(metrics.get(name, ABSENT)) for name in metric_names)])
+    return header, lines
