@@ -66,6 +66,30 @@ def slow(ctx):
     return {"slept": True}
 
 
+def timed(ctx):
+    began = time.time()
+    time.sleep(float(ctx.params["sleep"]))
+    return {"began": began, "ended": time.time(), "C": ctx.params["C"], "seed": ctx.seed}
+
+
+def waits(ctx):
+    marks = Path(os.environ["EXPRUN_TEST_MARKS"])
+    marks.mkdir(exist_ok=True)
+    (marks / str(os.getpid())).write_text("")
+    time.sleep(float(ctx.params["sleep"]))
+    return {"C": ctx.params["C"]}
+
+
+def ctrl_c(ctx):
+    raise KeyboardInterrupt
+
+
+def picky(ctx):
+    if ctx.params["C"] < 0:
+        raise ValueError("C must not be negative")
+    return {"C": ctx.params["C"], "seed": ctx.seed}
+
+
 def stubborn(ctx):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
