@@ -2,11 +2,27 @@
 
 ## Status
 
-**Milestone 5 of 6 complete: sweeps.** Next: milestone 6, the README with results, and a final
-audit. The plan is in
-[`docs/design.md`](docs/design.md).
+**All 6 milestones complete.** The README describes the project and its measured results; the
+original plan is in [`docs/design.md`](docs/design.md).
 
 ## Milestones
+
+### Milestone 6: write-up and audit
+
+- **README:** the problem, with the measured table; a tour of the demo with real output; how to write
+  your own experiment; commands and exit codes; how it works, with a diagram; testing; security,
+  privacy and limitations. The image at its top is rendered from the real output of two reruns.
+- **Fresh-clone audit:** cloned `main` from GitHub, installed it (not editable) into a new
+  environment, ran the 312 tests and lint, and walked the demo as a newcomer: demo, run, show,
+  list, a sweep of the forest, and `exprun demo` without the demo extra (a clear message and exit
+  code 2). Nothing failed.
+- **Changed after the audit:** `compare` is now listed next to `show` in `exprun --help`.
+- **Found by measuring for the README:** in a 12-run sweep, the seed (which also picks the
+  train/test split) moved accuracy at `C=0.01` from 0.891 to 0.933, and the ranges for `C=1` and
+  `C=10` overlapped. The README says so.
+- **Mutation testing, all milestones:** 156 planted bugs. 137 were caught at once, 16 survived
+  because of test gaps (all now tested), and 3 were in code that couldn't run (removed).
+
 
 ### Milestone 5: sweeps
 
