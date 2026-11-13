@@ -65,7 +65,11 @@ rather than assumed.
   - **Exit codes:** 0 if reproduced, 3 if not.
 - A demo task (scikit-learn on a dataset that ships with it), so everything runs offline.
 
-**Stretch:** parameter sweeps with a bounded number of parallel workers; an HTML comparison report.
+- `exprun sweep CONFIG --grid KEY=V1,V2,... [--workers N]` runs one ordinary run per combination
+  of the grid's values, at most N at a time, and prints a table of the results;
+  `exprun sweep-results [SWEEP]` shows it again later.
+
+**Stretch:** an HTML comparison report.
 
 **Not in scope:** remote execution, a server, a database service, distributed workers, or
 promising bit-for-bit reproduction everywhere. Platform and library behaviour can change results,
@@ -80,6 +84,8 @@ $ exprun run experiments/digits.toml --set model.C=10
 $ exprun list                            # runs, newest first: id, experiment, status, key metrics
 $ exprun compare 20261111-... 20261111-...  # what differs: config, data, code, environment, metrics
 $ exprun rerun 20261111-...              # re-executes and reports: identical / within tolerance / differs
+$ exprun sweep experiments/digits.toml --grid model.C=0.1,1,10 --grid seed=1,2,3 --workers 2
+$ exprun sweep-results --sort accuracy --descending
 ```
 
 ## Architecture
@@ -125,6 +131,27 @@ environment ─► capture (Python, platform, packages, thread settings)
   memory. Peak memory is in bytes on macOS and KiB on Linux, and is converted to bytes.
 - **Atomic writes.** The manifest is written to a temporary file, flushed to disk and renamed over
   the old one, so a reader sees either the old version or the new one, never half of each.
+- **Sweeps are runs plus a label.**
+  - Each grid point is an ordinary run whose manifest also records the sweep's id, the grid, and
+    the point's index and values. There is no separate sweep file to keep in sync: a sweep is the
+    set of runs carrying its id.
+  - Each point's values are recorded as `--set` overrides, so `exprun rerun` reproduces a run from
+    a sweep without knowing about sweeps.
+  - **Everything is checked before the first run:** each point's config, the task and the inputs.
+    A typo in the grid fails in a second, not after hours.
+  - **Seeds.** `seed` can be swept like a param. Otherwise every point shares one seed (the
+    config's, or one drawn for the whole sweep), so points differ only in what was swept.
+  - **Bounded parallelism with threads.** N worker threads each take the next point and run it as
+    usual: a child process, waited for with `wait4`. The threads only wait, so the GIL doesn't
+    limit anything; the work happens in the children. Run ids are claimed with `mkdir`, which is
+    already safe between concurrent runners.
+  - **Stopping.** Only the main thread receives signals. On Ctrl-C or SIGTERM it stops handing out
+    points and passes a stop request to every run in progress, which stops in the same stages as a
+    single run; a second Ctrl-C kills them. Points that never started are reported as not started.
+    A task that reports its own Ctrl-C is recorded as interrupted even if its worker reaped it
+    before seeing the request.
+  - **Output.** With one worker, tasks echo their output as `exprun run` does. With more, it would
+    interleave, so it goes only to each run's log files.
 
 ## Tech stack
 
@@ -192,8 +219,8 @@ runs/<run-id>/
 
 | Code | Meaning |
 |---|---|
-| 0 | Done (for `run` and `rerun`: the run succeeded) |
-| 1 | The run failed or was interrupted, or a file couldn't be read or written |
+| 0 | Done (for `run` and `rerun`: the run succeeded; for `sweep`: every run succeeded) |
+| 1 | A run failed or was interrupted (or, in a sweep, never started), or a file couldn't be read or written |
 | 2 | Bad usage or an invalid config, refused before anything runs |
 | 3 | `rerun` ran, but the result didn't reproduce |
 
@@ -239,7 +266,7 @@ request merged after CI passes.
 2. The runner: run folders, child process, atomic manifest, states, logs, failures, interruption.
 3. Reading runs: `list`, `show`, `compare`.
 4. Reproduction: `rerun`, its outcomes, the demo task, and measured sources of nondeterminism.
-5. Sweeps with bounded parallel workers (stretch).
+5. Sweeps with bounded parallel workers.
 6. README, results, final audit.
 
 ## Demo and portfolio evidence
